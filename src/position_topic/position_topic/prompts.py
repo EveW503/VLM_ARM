@@ -54,4 +54,6 @@ STAGE2_SYSTEM_PROMPT = """\
 - 如果没有发现清晰的草莓果实, pixel_x 和 pixel_y 均设为 -1
 """
 
-DEFAULT_USER_INSTRUCTION = "请分析这张图像, 找出最适合采摘的草莓果实并返回其坐标。"
+DEFAULT_STAGE1_USER_INSTRUCTION = "请分析这张图像, 找出最适合采摘的草莓果实并返回其坐标。"
+
+DEFAULT_STAGE2_USER_INSTRUCTION = "请分析这张近距离图像, 定位草莓果柄的精确采摘位置并返回其坐标。"
