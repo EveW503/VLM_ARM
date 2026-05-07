@@ -4,7 +4,7 @@
 
 本项目是一个基于 **ROS 2 Humble** 的机械臂仿真与控制系统，硬件平台为 **SO101 机械臂**（基于 [SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100) 开源模型修改而来）。项目运行环境为 **Ubuntu 22.04 + WSL2**，使用 **Gazebo Classic** 作为物理仿真引擎，集成 **MoveIt 2** 进行运动规划和轨迹执行，目标是实现 **草莓采摘（Strawberry Harvesting）** 的完整仿真任务。
 
-仿真场景已从简单抓取方块的 demo **移植为草莓农业场景**（来自 [strawberry_gazebo_sim](https://github.com/) 项目），包含泥土地面、草莓种植床（raised bed）、以及程序化生成的草莓植株模型。
+系统采用 **VLM 高层认知 + ROS 2 底层执行** 的混合分层架构：通过 Qwen3 VL Plus（DashScope）对双相机图像进行语义推理，将二维像素锚点反投影为三维目标位姿，再交由 MoveIt 2 执行抓取轨迹。仿真场景已从简单抓取方块的 demo **移植为草莓农业场景**（来自 [strawberry_gazebo_sim](https://github.com/) 项目），包含泥土地面、草莓种植床（raised bed）、以及程序化生成的草莓植株模型。
 
 ---
 
@@ -154,12 +154,17 @@ world (原点)
 
 ```
 position_topic/
-├── setup.py                          # 递归安装 models/ worlds/ launch/；注册 2 个入口点
+├── setup.py                          # 递归安装 models/ worlds/ launch/；注册 4 个入口点
 ├── position_topic/
 │   ├── position_publisher.py         # 目标位置发布节点 (PoseStamped @ 1Hz)
-│   └── position_subscriber.py        # 目标位姿订阅→MoveIt 规划执行
+│   ├── position_subscriber.py        # 目标位姿订阅→MoveIt 规划执行（手动调试用）
+│   ├── vlm_bridge.py                 # VLM 双阶段推理节点：相机→VLM→3D→发布目标
+│   ├── vlm_client.py                 # VLM API 封装：图像编码 + DashScope 调用 + JSON 解析
+│   ├── camera_utils.py               # 相机工具：深度查询 + 反投影 + TF2 变换
+│   ├── prompts.py                    # VLM System Prompt 模板（阶段一/二）
+│   └── grab_action.py               # 抓取全流程状态机：靠近→夹取→抬起→搬运→放置
 ├── launch/
-│   └── move_demo.launch.py           # 总启动器
+│   └── move_demo.launch.py           # 总启动器（含 vlm_bridge + grab_action）
 ├── models/
 │   ├── target_box.sdf                # 红色抓取目标: 3cm³ 立方体, 0.05kg
 │   ├── camera.sdf                    # 外部深度相机: Gemini 335, 640x480@30Hz
@@ -194,6 +199,23 @@ position_topic/
 - **订阅**: `/target_pose` → Action Client `/move_action` (MoveGroup)
 - **约束**: 仅位置约束（球形区域，半径 0.01m），无姿态约束
 - **参数**: velocity_scaling=0.3, accel_scaling=0.3, planning_attempts=10, planning_time=5.0s
+- **注意**: 保留用于手动调试；正式抓取流程由 grab_action 执行
+
+##### vlm_bridge — VLM 双阶段推理节点
+- **触发**: 订阅 `/task_command` (String)，收到自然语言指令后触发阶段一
+- **阶段一**: 订阅 Gemini 335 (`/camera/color/image_raw` + depth + info) → 调用 Qwen3 VL Plus → 解析 JSON 目标像素坐标 → 反投影 + TF2(`camera_depth_optical_frame→base`) → 发布 `/target_pre_grasp`
+- **阶段二**: 收到 `/grab_status="stage1_done"` 后，订阅 ee_camera (`/so101/camera/image_raw` + depth + info) → 同理映射 → 发布 `/target_pose`
+- **VLM API**: DashScope OpenAI 兼容接口，Key 从 `DASHSCOPE_API_KEY` 环境变量读取
+- **dry_run 模式**: `--ros-args -p dry_run:=true` 只推理不发布
+
+##### grab_action — 抓取全流程状态机
+- **触发**: 订阅 `/target_pre_grasp` → 自动开始全流程
+- **状态机**: PRE_GRASP → AWAIT_STAGE2 → APPROACH → GRASP → LIFT → TRANSPORT → PLACE → IDLE
+- **MoveIt**: 使用 MoveGroup action (`/move_action`) 规划 arm 组
+- **抓取**: 闭合夹爪 (关节6→-0.17) + 调用 `/ATTACHLINK` 服务附着物体
+- **放置**: 调用 `/DETACHLINK` + 张开夹爪 (关节6→0.5)
+- **降级**: 阶段二超时 10s → 用 pre_grasp Z 偏移作为抓取位姿
+- **反馈**: 发布 `/grab_status` 通知 vlm_bridge 阶段切换
 
 #### 草莓模型资产说明
 
@@ -261,8 +283,13 @@ ros2 launch position_topic move_demo.launch.py
    - 启动 move_group
    - 启动 RViz
 
-4. **position_subscriber** 节点
-   - 等待 `/target_pose` → MoveIt 规划执行
+4. **position_subscriber** 节点（手动调试用）
+
+5. **vlm_bridge** 节点
+   - 等待 `/task_command` → VLM 双阶段推理 → 发布抓取目标
+
+6. **grab_action** 节点
+   - 订阅 `/target_pre_grasp` + `/target_pose` → 自动执行全流程抓取
 
 ### 仅 RViz 可视化（无仿真）
 
@@ -297,6 +324,7 @@ colcon build --symlink-install --packages-select lerobot_description position_to
 | 运动规划 | MoveIt 2 + KDL Kinematics |
 | 控制器 | ros2_control (JointTrajectoryController) |
 | 语言 | Python (position_topic, launch), C++ (LinkAttacher) |
+| VLM | Qwen3 VL Plus (DashScope OpenAI 兼容接口) |
 | 构建系统 | ament_cmake / ament_python |
 | 3D 格式 | URDF/Xacro, SDF, COLLADA (.dae), STL |
 
@@ -313,18 +341,22 @@ colcon build --symlink-install --packages-select lerobot_description position_to
 - [x] GAZEBO_MODEL_PATH 自动注入
 - [x] 手眼相机 URDF 宏定义（`ee_camera_` 命名前缀）
 - [x] `position_only_ik` 引导式抓取规划
+- [x] VLM 双阶段推理节点 (vlm_bridge): 双相机 + Qwen3 VL Plus + 2D→3D 映射 + TF2 变换
+- [x] 抓取全流程状态机 (grab_action): MoveIt + LinkAttacher + 夹爪控制
+- [x] VLM API 封装 (vlm_client): 图像编码 + DashScope 调用 + JSON 解析
+- [x] 相机工具函数 (camera_utils): 深度查询 + 反投影 + TF2 变换
+- [x] VLM System Prompt 模板 (prompts): 阶段一全局理解 + 阶段二精确定位
 
-### 待完成
-- [ ] **抓取全流程闭环**: 靠近→附着→抬起→移动→放置→释放 的完整自动化
-- [ ] **vlm_bridge 节点**: 订阅相机图像/深度信息，为 VLM 推理提供数据通道
-- [ ] **2D→3D 坐标映射**: 像素坐标 + 深度 → 相机坐标系 → world 坐标系（TF2 变换）
-- [ ] **手眼相机 Gazebo 集成**: 虽然 URDF 已定义，但 launch 文件中未路由 `so101/camera/*` 话题
+### 待完成（第二阶段：智能排障与多目标）
+- [ ] 障碍物语义辨识（软/硬分类 + 推扫策略）
+- [ ] 自然语言驱动的多目标优先级排序
+- [ ] 推扫排障轨迹生成
+- [ ] MoveIt 碰撞场景动态管理（按 VLM 语义标签）
 
 ### 已知 Bug
-- **手眼相机 frame_name 错误**: `so101_camera_in_hand.xacro` 第 67 行 `<frame_name>camera_optical_link</frame_name>` 应为 `ee_camera_optical_link`
 - **碰撞禁用不完整**: MoveIt SRDF 中未禁用机械臂与草莓场景模型（bed/plant/dirt）之间的碰撞检测
 - **开环控制**: `arm_controller` 和 `gripper_controller` 使用 `open_loop_control: true`，无反馈校正
-- **速度缩放保守**: config 端 0.1，subscriber 端 0.3
+- **手眼相机 TF 由 robot_state_publisher 发布**: ee_camera_optical_link→base 的动态 TF 依赖关节状态，无关节状态时变换不可用
 
 ### 坐标系注意事项
 - 机械臂是 **fixed-base** 机器人（`base_joint` 是 fixed 类型），直接锚定在 world 坐标系上，不依赖物理支撑
