@@ -3,11 +3,15 @@ VLM API 调用封装: 图像编码、DashScope API 调用、JSON 响应解析。
 """
 import base64
 import json
+import logging
+import os
 import re
 
 import cv2
 from cv_bridge import CvBridge
 from openai import OpenAI
+
+_logger = logging.getLogger(__name__)
 
 
 class VlmClient:
@@ -20,8 +24,9 @@ class VlmClient:
         self._model = model
         self._bridge = CvBridge()
         if api_key is None:
-            import os
             api_key = os.environ.get("DASHSCOPE_API_KEY", "")
+        if not api_key:
+            _logger.warning("DASHSCOPE_API_KEY 未设置, VLM 调用将失败")
         self._client = OpenAI(api_key=api_key, base_url=base_url)
 
     def encode_image(self, image_msg):
@@ -70,10 +75,12 @@ class VlmClient:
                 ],
                 max_tokens=max_tokens,
                 temperature=0.1,
+                timeout=30.0,
             )
             text = response.choices[0].message.content
             return self._parse_response(text)
-        except Exception:
+        except Exception as exc:
+            _logger.error(f"VLM API 调用失败: {exc}", exc_info=True)
             return None
 
     def _parse_response(self, text):
