@@ -25,12 +25,14 @@ def get_depth_at_pixel(depth_msg, u, v):
     )
     h, w = data.shape
 
-    if 0 <= v < h and 0 <= u < w:
-        val = data[v, u]
-        if val > 0:
-            return val / 1000.0
+    if not (0 <= v < h and 0 <= u < w):
+        return None
 
-    # 3x3 邻域中值回退
+    val = data[v, u]
+    if val > 0:
+        return val / 1000.0
+
+    # 像素有效但深度值为 0 → 3x3 邻域中值回退
     r_min, r_max = max(0, v - 1), min(h, v + 2)
     c_min, c_max = max(0, u - 1), min(w, u + 2)
     patch = data[r_min:r_max, c_min:c_max]
@@ -77,11 +79,15 @@ def transform_point(tf_buffer, x, y, z, source_frame, target_frame, timeout_sec=
     Returns:
         tuple: (x', y', z') 在 target_frame 下, 或 None (变换失败)
     """
+    import logging
     import rclpy
     from geometry_msgs.msg import PointStamped
 
+    _logger = logging.getLogger(__name__)
+
     point = PointStamped()
     point.header.frame_id = source_frame
+    # Time() → sec=0,nsec=0 → "latest available transform" in TF2
     point.header.stamp = rclpy.time.Time().to_msg()
     point.point.x = x
     point.point.y = y
@@ -93,5 +99,6 @@ def transform_point(tf_buffer, x, y, z, source_frame, target_frame, timeout_sec=
             timeout=rclpy.duration.Duration(seconds=timeout_sec)
         )
         return (transformed.point.x, transformed.point.y, transformed.point.z)
-    except Exception:
+    except Exception as exc:
+        _logger.warning(f"TF transform failed: {source_frame}→{target_frame}: {exc}")
         return None
