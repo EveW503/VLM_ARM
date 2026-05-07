@@ -42,10 +42,31 @@ def generate_launch_description():
         output='screen'
     )
 
+    vlm_bridge = Node(
+        package='position_topic',
+        executable='vlm_bridge',
+        name='vlm_bridge',
+        output='screen'
+    )
+
+    grab_action = Node(
+        package='position_topic',
+        executable='grab_action',
+        name='grab_action',
+        output='screen',
+        parameters=[{
+            'placement_position': [0.2, -0.15, 0.25],
+            'pre_grasp_z_offset': 0.08,
+            'velocity_scaling': 0.3,
+        }]
+    )
+
     # 4. 将所有操作添加到 LaunchDescription 列表中返回
     return LaunchDescription([
         gazebo_launch,
         controller_launch,
         moveit_launch,
-        position_subscriber
+        position_subscriber,
+        vlm_bridge,
+        grab_action,
     ])
