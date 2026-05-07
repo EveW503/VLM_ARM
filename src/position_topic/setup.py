@@ -41,6 +41,8 @@ setup(
         'console_scripts': [
             'position_publisher = position_topic.position_publisher:main',
             'position_subscriber = position_topic.position_subscriber:main',
+            'vlm_bridge = position_topic.vlm_bridge:main',
+            'grab_action = position_topic.grab_action:main',
         ],
     },
 )
