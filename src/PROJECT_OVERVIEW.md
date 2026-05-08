@@ -140,7 +140,7 @@ world (原点)
 | 规划组 | `arm` (关节 1-5 + base_joint), `gripper` (关节 6) | |
 | 控制器桥接 | `arm_controller` / `gripper_controller` → `FollowJointTrajectory` | |
 
-**碰撞禁用对** (so101.srdf): base-shoulder, base-lower_arm, shoulder-upper_arm, shoulder-lower_arm, lower_arm-upper_arm, lower_arm-gripper, lower_arm-wrist, wrist-gripper, wrist-jaw, gripper-jaw。**注意**: 未加入与草莓场景模型（bed/plant）的碰撞禁用。
+**碰撞禁用对** (so101.srdf): base-shoulder, base-lower_arm, shoulder-upper_arm, shoulder-lower_arm, lower_arm-upper_arm, lower_arm-gripper, lower_arm-wrist, wrist-gripper, wrist-jaw, gripper-jaw, gripper-ee_camera_link, jaw-ee_camera_link, wrist-ee_camera_link。**注意**: 未加入与草莓场景模型（bed/plant）的碰撞禁用。
 
 ---
 
@@ -203,8 +203,8 @@ position_topic/
 
 ##### vlm_bridge — VLM 双阶段推理节点
 - **触发**: 订阅 `/task_command` (String)，收到自然语言指令后触发阶段一
-- **阶段一**: 订阅 Gemini 335 (`/camera/color/image_raw` + depth + info) → 调用 Qwen3 VL Plus → 解析 JSON 目标像素坐标 → 反投影 + TF2(`camera_depth_optical_frame→base`) → 发布 `/target_pre_grasp`
-- **阶段二**: 收到 `/grab_status="stage1_done"` 后，订阅 ee_camera (`/so101/camera/image_raw` + depth + info) → 同理映射 → 发布 `/target_pose`
+- **阶段一**: 订阅 Gemini 335 (`/camera/gemini_335/image_raw` + depth + info) → 调用 Qwen3 VL Plus → 归一化坐标[0,1000]转像素 → 反投影 + TF2(`camera_depth_optical_frame→base`) → 发布 `/target_pre_grasp`
+- **阶段二**: 收到 `/grab_status="stage1_done"` 后，订阅 ee_camera (`/so101/camera/end_effector_depth_camera/image_raw` + depth + info) → 同理映射 → 发布 `/target_pose`
 - **VLM API**: DashScope OpenAI 兼容接口，Key 从 `DASHSCOPE_API_KEY` 环境变量读取
 - **dry_run 模式**: `--ros-args -p dry_run:=true` 只推理不发布
 
@@ -356,7 +356,8 @@ colcon build --symlink-install --packages-select lerobot_description position_to
 ### 已知 Bug
 - **碰撞禁用不完整**: MoveIt SRDF 中未禁用机械臂与草莓场景模型（bed/plant/dirt）之间的碰撞检测
 - **开环控制**: `arm_controller` 和 `gripper_controller` 使用 `open_loop_control: true`，无反馈校正
-- **手眼相机 TF 由 robot_state_publisher 发布**: ee_camera_optical_link→base 的动态 TF 依赖关节状态，无关节状态时变换不可用
+- **目标位姿超出工作空间**: VLM 识别的草莓植株位置距离机械臂底座 ~0.45m，超过工作半径 ~0.35m，需将草莓植株挪近或使用更大工作空间的机械臂
+- **Joint 5 越限**: 某些姿态下关节 5 超过 URDF 限位 -2.79253 rad，导致后续规划失败
 
 ### 坐标系注意事项
 - 机械臂是 **fixed-base** 机器人（`base_joint` 是 fixed 类型），直接锚定在 world 坐标系上，不依赖物理支撑
