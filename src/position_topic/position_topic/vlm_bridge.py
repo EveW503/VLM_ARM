@@ -64,13 +64,13 @@ class VlmBridge(Node):
         self._ee_info = None
 
         self.create_subscription(
-            Image, "/so101/camera/image_raw", self._ee_rgb_cb, 10
+            Image, "/so101/camera/end_effector_depth_camera/image_raw", self._ee_rgb_cb, 10
         )
         self.create_subscription(
-            Image, "/so101/camera/depth/image_raw", self._ee_depth_cb, 10
+            Image, "/so101/camera/end_effector_depth_camera/depth/image_raw", self._ee_depth_cb, 10
         )
         self.create_subscription(
-            CameraInfo, "/so101/camera/depth/camera_info", self._ee_info_cb, 10
+            CameraInfo, "/so101/camera/end_effector_depth_camera/depth/camera_info", self._ee_info_cb, 10
         )
 
         # --- 任务指令 ---
