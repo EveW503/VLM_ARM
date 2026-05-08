@@ -268,7 +268,7 @@ class VlmBridge(Node):
                 self._vlm_in_progress = False
 
         except Exception as exc:
-            self.get_logger().error(f"阶段一异常: {exc}", exc_info=True)
+            self.get_logger().error(f"阶段一异常: {exc}")
             with self._lock:
                 self._state = self.STAGE_IDLE
                 self._vlm_in_progress = False
@@ -343,7 +343,7 @@ class VlmBridge(Node):
                 self._vlm_in_progress = False
 
         except Exception as exc:
-            self.get_logger().error(f"阶段二异常: {exc}", exc_info=True)
+            self.get_logger().error(f"阶段二异常: {exc}")
             with self._lock:
                 self._state = self.STAGE_IDLE
                 self._vlm_in_progress = False

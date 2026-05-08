@@ -10,7 +10,7 @@ def get_depth_at_pixel(depth_msg, u, v):
     如果目标像素无效 (深度为 0), 回退到 3x3 邻域中值。
 
     Args:
-        depth_msg: sensor_msgs/Image, encoding="16UC1", 单位为毫米
+        depth_msg: sensor_msgs/Image, encoding "16UC1" (mm) 或 "32FC1" (m)
         u: int, 像素列坐标
         v: int, 像素行坐标
 
@@ -20,25 +20,37 @@ def get_depth_at_pixel(depth_msg, u, v):
     u = int(u)
     v = int(v)
 
-    data = np.frombuffer(depth_msg.data, dtype=np.uint16).reshape(
-        depth_msg.height, depth_msg.width
-    )
-    h, w = data.shape
+    enc = depth_msg.encoding
+    if enc == "32FC1":
+        data = np.frombuffer(depth_msg.data, dtype=np.float32).reshape(
+            depth_msg.height, depth_msg.width
+        )
+        scale = 1.0  # 已经是米
+        invalid = np.isnan
+    elif enc == "16UC1":
+        data = np.frombuffer(depth_msg.data, dtype=np.uint16).reshape(
+            depth_msg.height, depth_msg.width
+        )
+        scale = 1.0 / 1000.0  # 毫米 → 米
+        invalid = lambda x: x == 0
+    else:
+        return None
 
+    h, w = data.shape
     if not (0 <= v < h and 0 <= u < w):
         return None
 
     val = data[v, u]
-    if val > 0:
-        return val / 1000.0
+    if not invalid(val):
+        return float(val) * scale
 
-    # 像素有效但深度值为 0 → 3x3 邻域中值回退
+    # 像素无效 → 3x3 邻域中值回退
     r_min, r_max = max(0, v - 1), min(h, v + 2)
     c_min, c_max = max(0, u - 1), min(w, u + 2)
     patch = data[r_min:r_max, c_min:c_max]
-    valid = patch[patch > 0]
-    if len(valid) > 0:
-        return float(np.median(valid)) / 1000.0
+    valid_mask = ~invalid(patch)
+    if valid_mask.any():
+        return float(np.median(patch[valid_mask])) * scale
     return None
 
 
