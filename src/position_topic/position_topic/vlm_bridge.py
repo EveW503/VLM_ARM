@@ -49,13 +49,13 @@ class VlmBridge(Node):
         self._gemini_info = None
 
         self.create_subscription(
-            Image, "/camera/color/image_raw", self._gemini_rgb_cb, 10
+            Image, "/camera/gemini_335/image_raw", self._gemini_rgb_cb, 10
         )
         self.create_subscription(
-            Image, "/camera/depth/image_raw", self._gemini_depth_cb, 10
+            Image, "/camera/gemini_335/depth/image_raw", self._gemini_depth_cb, 10
         )
         self.create_subscription(
-            CameraInfo, "/camera/depth/camera_info", self._gemini_info_cb, 10
+            CameraInfo, "/camera/gemini_335/depth/camera_info", self._gemini_info_cb, 10
         )
 
         # --- ee_camera 手眼相机订阅 ---
