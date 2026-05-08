@@ -93,6 +93,7 @@ def transform_point(tf_buffer, x, y, z, source_frame, target_frame, timeout_sec=
     """
     import logging
     import rclpy
+    import tf2_geometry_msgs  # noqa: F401 — 注册 geometry_msgs 的 TF2 类型支持
     from geometry_msgs.msg import PointStamped
 
     _logger = logging.getLogger(__name__)
