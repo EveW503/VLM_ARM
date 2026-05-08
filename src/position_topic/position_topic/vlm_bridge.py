@@ -231,11 +231,16 @@ class VlmBridge(Node):
                     self._vlm_in_progress = False
                 return
 
+            # Qwen3-VL 使用归一化坐标 [0, 1000] → 转换为实际像素坐标
+            px_pixel = int(px / 1000.0 * rgb.width)
+            py_pixel = int(py / 1000.0 * rgb.height)
+
             self.get_logger().info(
-                f"阶段一结果: ({px}, {py}) label={label} conf={confidence:.2f}"
+                f"阶段一结果: norm=({px}, {py}) → pixel=({px_pixel}, {py_pixel}) "
+                f"label={label} conf={confidence:.2f}"
             )
 
-            Z = get_depth_at_pixel(depth, px, py)
+            Z = get_depth_at_pixel(depth, px_pixel, py_pixel)
             if Z is None:
                 self.get_logger().error("阶段一: 深度查询失败")
                 with self._lock:
@@ -243,7 +248,7 @@ class VlmBridge(Node):
                     self._vlm_in_progress = False
                 return
 
-            X_cam, Y_cam, Z_cam = pixel_to_camera_3d(px, py, Z, info)
+            X_cam, Y_cam, Z_cam = pixel_to_camera_3d(px_pixel, py_pixel, Z, info)
             pt = transform_point(
                 self._tf_buffer,
                 X_cam, Y_cam, Z_cam,
@@ -306,11 +311,16 @@ class VlmBridge(Node):
                     self._vlm_in_progress = False
                 return
 
+            # Qwen3-VL 使用归一化坐标 [0, 1000] → 转换为实际像素坐标
+            px_pixel = int(px / 1000.0 * rgb.width)
+            py_pixel = int(py / 1000.0 * rgb.height)
+
             self.get_logger().info(
-                f"阶段二结果: ({px}, {py}) label={label} conf={confidence:.2f}"
+                f"阶段二结果: norm=({px}, {py}) → pixel=({px_pixel}, {py_pixel}) "
+                f"label={label} conf={confidence:.2f}"
             )
 
-            Z = get_depth_at_pixel(depth, px, py)
+            Z = get_depth_at_pixel(depth, px_pixel, py_pixel)
             if Z is None:
                 self.get_logger().error("阶段二: 深度查询失败")
                 with self._lock:
@@ -318,7 +328,7 @@ class VlmBridge(Node):
                     self._vlm_in_progress = False
                 return
 
-            X_cam, Y_cam, Z_cam = pixel_to_camera_3d(px, py, Z, info)
+            X_cam, Y_cam, Z_cam = pixel_to_camera_3d(px_pixel, py_pixel, Z, info)
             pt = transform_point(
                 self._tf_buffer,
                 X_cam, Y_cam, Z_cam,
