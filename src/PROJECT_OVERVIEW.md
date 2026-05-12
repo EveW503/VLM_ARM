@@ -162,7 +162,8 @@ position_topic/
 │   ├── vlm_client.py                 # VLM API 封装：图像编码 + DashScope 调用 + JSON 解析
 │   ├── camera_utils.py               # 相机工具：深度查询 + 反投影 + TF2 变换
 │   ├── prompts.py                    # VLM System Prompt 模板（阶段一/二）
-│   └── grab_action.py               # 抓取全流程状态机：靠近→夹取→抬起→搬运→放置
+│   ├── grab_action.py               # 抓取全流程状态机：SETUP→预抓取→接近→夹取→抬起→搬运→放置
+│   └── planning_scene_manager.py     # Planning Scene 封装：物体/碰撞/附着管理
 ├── launch/
 │   └── move_demo.launch.py           # 总启动器（含 vlm_bridge + grab_action）
 ├── models/
@@ -210,12 +211,18 @@ position_topic/
 
 ##### grab_action — 抓取全流程状态机
 - **触发**: 订阅 `/target_pre_grasp` → 自动开始全流程
-- **状态机**: PRE_GRASP → AWAIT_STAGE2 → APPROACH → GRASP → LIFT → TRANSPORT → PLACE → IDLE
-- **MoveIt**: 使用 MoveGroup action (`/move_action`) 规划 arm 组
-- **抓取**: 闭合夹爪 (关节6→-0.17) + 调用 `/ATTACHLINK` 服务附着物体
-- **放置**: 调用 `/DETACHLINK` + 张开夹爪 (关节6→0.5)
+- **状态机**: SETUP → PRE_GRASP → AWAIT_STAGE2 → APPROACH → GRASP → LIFT → TRANSPORT → PLACE → IDLE
+- **Planning Scene 集成**: SETUP 阶段通过 `PlanningSceneManager` 将目标物体注册到 MoveIt（`add_object`），PRE_GRASP 自动绕行；APPROACH 通过 `allow_collision`/`remove_object` 让 MoveIt 不再避让
+- **双层同步**: GRASP 阶段同时操作 Gazebo (`AttachLink`) 和 MoveIt (`attach_object`)，PLACE 阶段两层一起清理
+- **夹爪时机**: APPROACH 阶段张爪（离目标仅 8cm，不会引入规划失败），SETUP/PRE_GRASP 保持闭合
 - **降级**: 阶段二超时 10s → 用 pre_grasp Z 偏移作为抓取位姿
 - **反馈**: 发布 `/grab_status` 通知 vlm_bridge 阶段切换
+
+##### planning_scene_manager — Planning Scene 操作封装
+- **依赖**: `moveit_msgs.srv.ApplyPlanningScene`（Humble 标准服务）
+- **物体管理**: `add_object` / `remove_object` / `remove_all_objects`
+- **碰撞策略**: `allow_collision(link, object)` / `forbid_collision(link, object)` — Phase 2 排障直接复用
+- **附着**: `attach_object` / `detach_object` — MoveIt 层，与 Gazebo LinkAttacher 平行
 
 #### 草莓模型资产说明
 
@@ -342,7 +349,8 @@ colcon build --symlink-install --packages-select lerobot_description position_to
 - [x] 手眼相机 URDF 宏定义（`ee_camera_` 命名前缀）
 - [x] `position_only_ik` 引导式抓取规划
 - [x] VLM 双阶段推理节点 (vlm_bridge): 双相机 + Qwen3 VL Plus + 2D→3D 映射 + TF2 变换
-- [x] 抓取全流程状态机 (grab_action): MoveIt + LinkAttacher + 夹爪控制
+- [x] 抓取全流程状态机 (grab_action): Planning Scene 集成 + 双层同步 + MoveIt + LinkAttacher
+- [x] Planning Scene 管理器 (planning_scene_manager): 物体/碰撞/附着封装，Phase 2 复用
 - [x] VLM API 封装 (vlm_client): 图像编码 + DashScope 调用 + JSON 解析
 - [x] 相机工具函数 (camera_utils): 深度查询 + 反投影 + TF2 变换
 - [x] VLM System Prompt 模板 (prompts): 阶段一全局理解 + 阶段二精确定位
