@@ -248,10 +248,12 @@ class GrabAction(Node):
             elif approach_mode == "auto":
                 self.get_logger().info("allow_collision 失败, fallback → remove_object")
                 self._psm.remove_object("target")
+                self._target_object_registered = False
             else:
                 self.get_logger().warning("allow_collision 失败")
         elif approach_mode == "remove":
             self._psm.remove_object("target")
+            self._target_object_registered = False
 
         self._plan_approach()
 
