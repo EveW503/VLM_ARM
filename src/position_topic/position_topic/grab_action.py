@@ -174,8 +174,6 @@ class GrabAction(Node):
         else:
             self.get_logger().warning("目标物体注册失败，将使用旧行为")
 
-        # 触发 vlm_bridge stage 2
-        self._publish_status("stage1_done")
         self._transition(self.PRE_GRASP_PLAN)
 
     # ── 预抓取 ──────────────────────────────────────
@@ -203,6 +201,7 @@ class GrabAction(Node):
 
     def _on_pre_grasp_done(self):
         self.get_logger().info("预抓取完成, 等待阶段二精定位...")
+        self._publish_status("stage1_done")
         self._state = self.AWAIT_STAGE2
         self._stage2_timer = self.create_timer(
             self.get_parameter("stage2_timeout").value,
