@@ -8,7 +8,7 @@ Planning Scene 操作封装。
 """
 import rclpy
 from rclpy.node import Node
-from moveit_msgs.srv import ApplyPlanningScene, GetPlanningScene
+from moveit_msgs.srv import ApplyPlanningScene
 from moveit_msgs.msg import (
     PlanningScene, CollisionObject, AttachedCollisionObject,
     AllowedCollisionEntry,
@@ -23,7 +23,6 @@ class PlanningSceneManager:
         self._node = node
         self._logger = node.get_logger()
         self._apply_cli = node.create_client(ApplyPlanningScene, "/apply_planning_scene")
-        self._get_cli = node.create_client(GetPlanningScene, "/get_planning_scene")
 
     # ── 物体管理 ──────────────────────────────────
 
@@ -61,7 +60,7 @@ class PlanningSceneManager:
 
     def remove_all_objects(self):
         obj = CollisionObject()
-        obj.id = "__all__"
+        obj.id = ""
         obj.operation = CollisionObject.REMOVE
 
         scene = PlanningScene()
@@ -87,10 +86,11 @@ class PlanningSceneManager:
         return self._call_apply(scene, f"allow_collision({link1}, {object_id})")
 
     def forbid_collision(self, link1, object_id):
-        entry = AllowedCollisionEntry()
-        entry.enabled = [False]
         scene = PlanningScene()
         scene.is_diff = True
+
+        entry = AllowedCollisionEntry()
+        entry.enabled = [False]
         scene.allowed_collision_matrix.entry_names = [link1, object_id]
         scene.allowed_collision_matrix.entry_values = [entry]
 
@@ -141,10 +141,15 @@ class PlanningSceneManager:
         future = self._apply_cli.call_async(req)
         rclpy.spin_until_future_complete(self._node, future, timeout_sec=2.0)
 
-        if future.done() and future.result() is not None:
-            if future.result().success:
-                return True
-            self._logger.warning(f"ApplyPlanningScene 失败 ({tag})")
-        else:
-            self._logger.warning(f"ApplyPlanningScene 超时 ({tag})")
+        if future.done():
+            if future.result() is not None:
+                if future.result().success:
+                    return True
+                self._logger.warning(f"ApplyPlanningScene 失败 ({tag})")
+                return False
+            exc = future.exception()
+            if exc:
+                self._logger.warning(f"ApplyPlanningScene 异常 ({tag}): {exc}")
+                return False
+        self._logger.warning(f"ApplyPlanningScene 超时 ({tag})")
         return False
