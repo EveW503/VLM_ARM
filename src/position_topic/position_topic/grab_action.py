@@ -1,8 +1,15 @@
 """
 Grab Action 节点: 抓取全流程状态机。
 
-订阅 /target_pre_grasp (阶段一粗定位) 和 /target_pose (阶段二精定位),
-执行: 靠近→下移→夹取→抬起→搬运→放置→释放。
+集成 PlanningSceneManager 管理 MoveIt 世界模型:
+- SETUP: 注册目标物体到 planning scene
+- PRE_GRASP: 物体在 scene → MoveIt 自动绕行
+- APPROACH: 张爪 + allow_collision → 进入目标
+- GRASP: 双层附着 (Gazebo LinkAttacher + MoveIt attach_object)
+- LIFT/TRANSPORT: 物体附着 → 自动防碰
+- PLACE: 双层脱离 + 清理 scene
+
+订阅 /target_pre_grasp (阶段一粗定位) 和 /target_pose (阶段二精定位).
 """
 import rclpy
 from rclpy.node import Node
@@ -20,20 +27,19 @@ from linkattacher_msgs.srv import AttachLink, DetachLink
 from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
+from .planning_scene_manager import PlanningSceneManager
+
 
 class GrabAction(Node):
     # 状态常量
     IDLE = "idle"
+    SETUP = "setup"
     PRE_GRASP_PLAN = "pre_grasp_plan"
-    PRE_GRASP_EXEC = "pre_grasp_exec"
     AWAIT_STAGE2 = "await_stage2"
-    APPROACH_PLAN = "approach_plan"
-    APPROACH_EXEC = "approach_exec"
+    APPROACH = "approach"
     GRASP = "grasp"
     LIFT_PLAN = "lift_plan"
-    LIFT_EXEC = "lift_exec"
     TRANSPORT_PLAN = "transport_plan"
-    TRANSPORT_EXEC = "transport_exec"
     PLACE = "place"
     FAILED = "failed"
 
@@ -43,12 +49,17 @@ class GrabAction(Node):
         # --- 参数 ---
         self.declare_parameter("placement_position", [0.2, -0.15, 0.25])
         self.declare_parameter("pre_grasp_z_offset", 0.08)
-        self.declare_parameter("approach_step", 0.01)
         self.declare_parameter("gripper_close_pos", -0.17)
         self.declare_parameter("gripper_open_pos", 0.5)
         self.declare_parameter("stage2_timeout", 10.0)
         self.declare_parameter("planning_time", 5.0)
         self.declare_parameter("velocity_scaling", 0.3)
+        self.declare_parameter("approach_mode", "auto")
+        self.declare_parameter("target_object_shape", "BOX")
+        self.declare_parameter("target_object_dims", [0.03, 0.03, 0.03])
+
+        # --- Planning Scene Manager ---
+        self._psm = PlanningSceneManager(self)
 
         # --- 输入订阅 ---
         self.create_subscription(
@@ -80,8 +91,9 @@ class GrabAction(Node):
         self._pre_grasp_target = None
         self._grasp_target = None
         self._stage2_timer = None
+        self._target_object_registered = False
 
-        self.get_logger().info("Grab Action 节点已启动")
+        self.get_logger().info("Grab Action 节点已启动 (PSM 集成)")
 
     # ── 回调 ──────────────────────────────────────────
 
@@ -93,7 +105,8 @@ class GrabAction(Node):
             )
             self._pre_grasp_target = msg
             self._grasp_target = None
-            self._transition(self.PRE_GRASP_PLAN)
+            self._target_object_registered = False
+            self._transition(self.SETUP)
 
     def _target_pose_cb(self, msg):
         self.get_logger().info(
@@ -105,16 +118,18 @@ class GrabAction(Node):
             if self._stage2_timer is not None:
                 self.destroy_timer(self._stage2_timer)
                 self._stage2_timer = None
-            self._transition(self.APPROACH_PLAN)
+            self._transition(self.APPROACH)
 
     # ── 状态机驱动 ────────────────────────────────────
 
     def _transition(self, new_state):
         self._state = new_state
-        if new_state == self.PRE_GRASP_PLAN:
+        if new_state == self.SETUP:
+            self._do_setup()
+        elif new_state == self.PRE_GRASP_PLAN:
             self._plan_pre_grasp()
-        elif new_state == self.APPROACH_PLAN:
-            self._plan_approach()
+        elif new_state == self.APPROACH:
+            self._do_approach()
         elif new_state == self.LIFT_PLAN:
             self._plan_lift()
         elif new_state == self.TRANSPORT_PLAN:
@@ -129,13 +144,44 @@ class GrabAction(Node):
             self._state = self.IDLE
 
     def _publish_status(self, status):
-        msg = String(data=status)
-        self._status_pub.publish(msg)
+        self._status_pub.publish(String(data=status))
+
+    # ── SETUP ─────────────────────────────────────
+
+    def _do_setup(self):
+        """注册目标物体到 Planning Scene，触发 vlm_bridge stage 2。"""
+        self.get_logger().info("SETUP: 注册目标物体到 Planning Scene...")
+
+        target = self._pre_grasp_target
+        if target is None:
+            self._transition(self.FAILED)
+            return
+
+        shape_map = {"BOX": SolidPrimitive.BOX, "SPHERE": SolidPrimitive.SPHERE,
+                     "CYLINDER": SolidPrimitive.CYLINDER}
+        shape_type = shape_map.get(
+            self.get_parameter("target_object_shape").value, SolidPrimitive.BOX
+        )
+        dims = self.get_parameter("target_object_dims").value
+
+        success = self._psm.add_object(
+            "target", shape_type, dims,
+            target.pose, target.header.frame_id or "base"
+        )
+        if success:
+            self._target_object_registered = True
+            self.get_logger().info("目标物体已注册到 Planning Scene")
+        else:
+            self.get_logger().warning("目标物体注册失败，将使用旧行为")
+
+        # 触发 vlm_bridge stage 2
+        self._publish_status("stage1_done")
+        self._transition(self.PRE_GRASP_PLAN)
 
     # ── 预抓取 ──────────────────────────────────────
 
     def _plan_pre_grasp(self):
-        self.get_logger().info("规划预抓取位姿...")
+        self.get_logger().info("规划预抓取位姿 (物体在 scene → MoveIt 绕行)...")
         target = self._pre_grasp_target
         if target is None:
             self._transition(self.FAILED)
@@ -157,7 +203,6 @@ class GrabAction(Node):
 
     def _on_pre_grasp_done(self):
         self.get_logger().info("预抓取完成, 等待阶段二精定位...")
-        self._publish_status("stage1_done")
         self._state = self.AWAIT_STAGE2
         self._stage2_timer = self.create_timer(
             self.get_parameter("stage2_timeout").value,
@@ -179,12 +224,39 @@ class GrabAction(Node):
                 position=Point(x=t.pose.position.x, y=t.pose.position.y, z=fb_z),
                 orientation=Quaternion(w=1.0),
             )
-        self._transition(self.APPROACH_PLAN)
+        self._transition(self.APPROACH)
 
-    # ── 接近 (直线下移) ────────────────────────────
+    # ── 接近 ──────────────────────────────────────
+
+    def _do_approach(self):
+        """张爪 + 碰撞策略 + 规划下移。"""
+        self.get_logger().info("APPROACH: 张爪...")
+        self._send_gripper_command(
+            self.get_parameter("gripper_open_pos").value,
+            done_callback=self._on_approach_open_done,
+            fail_callback=lambda: self._transition(self.FAILED),
+        )
+
+    def _on_approach_open_done(self):
+        approach_mode = self.get_parameter("approach_mode").value
+        self.get_logger().info(f"APPROACH: 碰撞策略 ({approach_mode})...")
+
+        if approach_mode in ("allow", "auto"):
+            ok = self._psm.allow_collision("gripper", "target")
+            if ok:
+                self.get_logger().info("allow_collision 成功")
+            elif approach_mode == "auto":
+                self.get_logger().info("allow_collision 失败, fallback → remove_object")
+                self._psm.remove_object("target")
+            else:
+                self.get_logger().warning("allow_collision 失败")
+        elif approach_mode == "remove":
+            self._psm.remove_object("target")
+
+        self._plan_approach()
 
     def _plan_approach(self):
-        self.get_logger().info("规划接近路径...")
+        self.get_logger().info("规划接近路径 (物体不再遮挡)...")
         if self._grasp_target is None:
             self._transition(self.FAILED)
             return
@@ -210,13 +282,14 @@ class GrabAction(Node):
         )
 
     def _on_gripper_close_done(self):
-        self.get_logger().info("调用 AttachLink...")
+        self.get_logger().info("双层附着: Gazebo AttachLink + MoveIt attach_object...")
 
         if not self._attach_cli.wait_for_service(timeout_sec=2.0):
             self.get_logger().error("AttachLink 服务不可用")
             self._transition(self.FAILED)
             return
 
+        # Gazebo 层附着
         req = AttachLink.Request()
         req.model1_name = "so101"
         req.link1_name = "gripper"
@@ -229,21 +302,27 @@ class GrabAction(Node):
     def _on_attach_done(self, future):
         try:
             resp = future.result()
-            if resp.success:
-                self.get_logger().info("物体已附着")
-                self._publish_status("stage2_done")
-                self._transition(self.LIFT_PLAN)
-            else:
+            if not resp.success:
                 self.get_logger().error(f"AttachLink 失败: {resp.message}")
                 self._transition(self.FAILED)
+                return
+            self.get_logger().info("Gazebo AttachLink 成功")
         except Exception as exc:
-            self.get_logger().error(f"AttachLink 调用异常: {exc}")
+            self.get_logger().error(f"AttachLink 异常: {exc}")
             self._transition(self.FAILED)
+            return
+
+        # MoveIt 层附着
+        self._psm.attach_object("target", "gripper", ["jaw"])
+        self.get_logger().info("MoveIt attach_object 完成")
+
+        self._publish_status("stage2_done")
+        self._transition(self.LIFT_PLAN)
 
     # ── 抬起 ──────────────────────────────────────
 
     def _plan_lift(self):
-        self.get_logger().info("规划抬起路径...")
+        self.get_logger().info("规划抬起 (物体已附着, 自动防碰)...")
         lift_pose = Pose()
         lift_pose.position = Point(
             x=self._pre_grasp_target.pose.position.x,
@@ -262,12 +341,10 @@ class GrabAction(Node):
     # ── 搬运 ──────────────────────────────────────
 
     def _plan_transport(self):
-        self.get_logger().info("规划搬运到放置位姿...")
+        self.get_logger().info("规划搬运...")
         placement = self.get_parameter("placement_position").value
         place_pose = Pose()
-        place_pose.position = Point(
-            x=placement[0], y=placement[1], z=placement[2]
-        )
+        place_pose.position = Point(x=placement[0], y=placement[1], z=placement[2])
         place_pose.orientation = Quaternion(w=1.0)
 
         self._send_move_request(
@@ -279,11 +356,10 @@ class GrabAction(Node):
     # ── 放置 ──────────────────────────────────────
 
     def _do_place(self):
-        self.get_logger().info("释放物体...")
+        self.get_logger().info("PLACE: 双层脱离...")
 
-        if not self._detach_cli.wait_for_service(timeout_sec=2.0):
-            self.get_logger().warning("DetachLink 服务不可用, 仍然张开夹爪")
-        else:
+        # Gazebo 层脱离
+        if self._detach_cli.wait_for_service(timeout_sec=2.0):
             req = DetachLink.Request()
             req.model1_name = "so101"
             req.link1_name = "gripper"
@@ -292,23 +368,27 @@ class GrabAction(Node):
             future = self._detach_cli.call_async(req)
             future.add_done_callback(self._on_detach_done)
             return
-
-        self._send_gripper_command(
-            self.get_parameter("gripper_open_pos").value,
-            done_callback=self._on_place_complete,
-            fail_callback=self._on_place_complete,
-        )
+        else:
+            self.get_logger().warning("DetachLink 不可用")
+            self._on_detach_done(None)
 
     def _on_detach_done(self, future):
-        try:
-            resp = future.result()
-            if resp.success:
-                self.get_logger().info("物体已释放")
-            else:
-                self.get_logger().warning(f"DetachLink: {resp.message}")
-        except Exception as exc:
-            self.get_logger().warning(f"DetachLink 调用异常: {exc}")
+        if future is not None:
+            try:
+                resp = future.result()
+                if resp.success:
+                    self.get_logger().info("Gazebo DetachLink 成功")
+            except Exception as exc:
+                self.get_logger().warning(f"DetachLink: {exc}")
 
+        # MoveIt 层清理: detach + forbid + remove
+        self._psm.detach_object("target", "gripper")
+        self._psm.forbid_collision("gripper", "target")
+
+        if self._target_object_registered:
+            self._psm.remove_object("target")
+
+        # 张爪
         self._send_gripper_command(
             self.get_parameter("gripper_open_pos").value,
             done_callback=self._on_place_complete,
