@@ -65,7 +65,7 @@ def generate_launch_description():
         arguments=[
             "-entity", "target_box",
             "-file", target_file,
-            '-x', '0.15', '-y', '0.0', '-z', '0.12'
+            '-x', '0.20', '-y', '0.0', '-z', '0.19'
         ],
         output="screen"
     )
