@@ -532,8 +532,10 @@ class GrabAction(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = GrabAction()
+    executor = rclpy.executors.MultiThreadedExecutor()
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
