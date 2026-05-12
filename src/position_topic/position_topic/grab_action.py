@@ -482,7 +482,7 @@ class GrabAction(Node):
     def _send_gripper_command(self, position, *, done_callback, fail_callback):
         if not self._gripper_action.wait_for_server(timeout_sec=2.0):
             self.get_logger().error("夹爪 action server 不可用")
-            fail_cb()
+            fail_callback()
             return
 
         goal = FollowJointTrajectory.Goal()
@@ -498,35 +498,35 @@ class GrabAction(Node):
             lambda f: self._gripper_response_cb(f, done_callback, fail_callback)
         )
 
-    def _gripper_response_cb(self, future, done_cb, fail_cb):
+    def _gripper_response_cb(self, future, done_callback, fail_callback):
         try:
             goal_handle = future.result()
         except Exception as exc:
             self.get_logger().error(f"发送夹爪指令失败: {exc}")
-            fail_cb()
+            fail_callback()
             return
         if not goal_handle.accepted:
             self.get_logger().warning("夹爪控制器拒绝指令")
-            fail_cb()
+            fail_callback()
             return
 
         result_future = goal_handle.get_result_async()
         result_future.add_done_callback(
-            lambda f: self._gripper_result_cb(f, done_cb, fail_cb)
+            lambda f: self._gripper_result_cb(f, done_callback, fail_callback)
         )
 
-    def _gripper_result_cb(self, future, done_cb, fail_cb):
+    def _gripper_result_cb(self, future, done_callback, fail_callback):
         try:
             wrapped = future.result()
         except Exception as exc:
             self.get_logger().error(f"获取夹爪结果失败: {exc}")
-            fail_cb()
+            fail_callback()
             return
         if wrapped.result.error_code == 0:
-            done_cb()
+            done_callback()
         else:
             self.get_logger().warning(f"夹爪执行失败: {wrapped.result.error_string}")
-            fail_cb()
+            fail_callback()
 
 
 def main(args=None):
