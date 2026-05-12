@@ -54,6 +54,52 @@ def get_depth_at_pixel(depth_msg, u, v):
     return None
 
 
+def get_min_depth_in_region(depth_msg, x1, y1, x2, y2):
+    """
+    取图像矩形区域内的最小有效深度值 (米)。
+    用于从 VLM bbox 区域确定最近点——排除远处背景的干扰。
+
+    Args:
+        depth_msg: sensor_msgs/Image, encoding "16UC1" 或 "32FC1"
+        x1, y1: 左上角像素坐标
+        x2, y2: 右下角像素坐标
+
+    Returns:
+        float: 区域最小深度值 (米), 或 None
+    """
+    x1, y1 = int(x1), int(y1)
+    x2, y2 = int(x2), int(y2)
+
+    enc = depth_msg.encoding
+    if enc == "32FC1":
+        data = np.frombuffer(depth_msg.data, dtype=np.float32).reshape(
+            depth_msg.height, depth_msg.width)
+        scale = 1.0
+        invalid = np.isnan
+    elif enc == "16UC1":
+        data = np.frombuffer(depth_msg.data, dtype=np.uint16).reshape(
+            depth_msg.height, depth_msg.width)
+        scale = 1.0 / 1000.0
+        invalid = lambda x: x == 0
+    else:
+        return None
+
+    h, w = data.shape
+    x1 = max(x1, 0)
+    y1 = max(y1, 0)
+    x2 = min(x2, w)
+    y2 = min(y2, h)
+
+    if x1 >= x2 or y1 >= y2:
+        return None
+
+    region = data[y1:y2, x1:x2]
+    valid = region[~invalid(region)]
+    if len(valid) > 0:
+        return float(np.min(valid)) * scale
+    return None
+
+
 def pixel_to_camera_3d(u, v, Z, camera_info):
     """
     针孔相机模型反投影: 像素坐标 + 深度 → 相机光学坐标系 3D 点。

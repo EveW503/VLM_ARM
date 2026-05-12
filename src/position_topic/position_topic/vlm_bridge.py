@@ -13,7 +13,7 @@ from std_msgs.msg import String
 from geometry_msgs.msg import PoseStamped, Point
 import tf2_ros
 
-from .camera_utils import get_depth_at_pixel, pixel_to_camera_3d, transform_point
+from .camera_utils import get_min_depth_in_region, pixel_to_camera_3d, transform_point
 from .prompts import (
     STAGE1_SYSTEM_PROMPT,
     STAGE2_SYSTEM_PROMPT,
@@ -219,28 +219,32 @@ class VlmBridge(Node):
                 return
 
             target = result.get("target", {})
-            px = target.get("pixel_x", -1)
-            py = target.get("pixel_y", -1)
+            bbox = target.get("bbox", [-1, -1, -1, -1])
             confidence = target.get("confidence", 0.0)
             label = target.get("label", "unknown")
 
-            if px < 0 or py < 0:
+            if bbox[0] < 0:
                 self.get_logger().warning("VLM 未发现可采摘目标")
                 with self._lock:
                     self._state = self.STAGE_IDLE
                     self._vlm_in_progress = False
                 return
 
-            # Qwen3-VL 使用归一化坐标 [0, 1000] → 转换为实际像素坐标
-            px_pixel = int(px / 1000.0 * rgb.width)
-            py_pixel = int(py / 1000.0 * rgb.height)
+            # Qwen3-VL bbox 使用归一化坐标 [0, 1000] → 转换为实际像素坐标
+            x1 = int(bbox[0] / 1000.0 * rgb.width)
+            y1 = int(bbox[1] / 1000.0 * rgb.height)
+            x2 = int(bbox[2] / 1000.0 * rgb.width)
+            y2 = int(bbox[3] / 1000.0 * rgb.height)
+            cx = (x1 + x2) // 2
+            cy = (y1 + y2) // 2
 
             self.get_logger().info(
-                f"阶段一结果: norm=({px}, {py}) → pixel=({px_pixel}, {py_pixel}) "
-                f"label={label} conf={confidence:.2f}"
+                f"阶段一结果: bbox_norm={bbox} → pixel=[{x1},{y1},{x2},{y2}] "
+                f"center=[{cx},{cy}] label={label} conf={confidence:.2f}"
             )
 
-            Z = get_depth_at_pixel(depth, px_pixel, py_pixel)
+            # bbox 区域内最小深度 = 目标顶部 (排除地面背景)
+            Z = get_min_depth_in_region(depth, x1, y1, x2, y2)
             if Z is None:
                 self.get_logger().error("阶段一: 深度查询失败")
                 with self._lock:
@@ -248,7 +252,8 @@ class VlmBridge(Node):
                     self._vlm_in_progress = False
                 return
 
-            X_cam, Y_cam, Z_cam = pixel_to_camera_3d(px_pixel, py_pixel, Z, info)
+            # XY 用 bbox 中心，Z 用区域内最小值
+            X_cam, Y_cam, Z_cam = pixel_to_camera_3d(cx, cy, Z, info)
             pt = transform_point(
                 self._tf_buffer,
                 X_cam, Y_cam, Z_cam,
@@ -299,28 +304,30 @@ class VlmBridge(Node):
                 return
 
             target = result.get("target", {})
-            px = target.get("pixel_x", -1)
-            py = target.get("pixel_y", -1)
+            bbox = target.get("bbox", [-1, -1, -1, -1])
             confidence = target.get("confidence", 0.0)
             label = target.get("label", "unknown")
 
-            if px < 0 or py < 0:
+            if bbox[0] < 0:
                 self.get_logger().warning("VLM 阶段二未发现目标")
                 with self._lock:
                     self._state = self.STAGE_IDLE
                     self._vlm_in_progress = False
                 return
 
-            # Qwen3-VL 使用归一化坐标 [0, 1000] → 转换为实际像素坐标
-            px_pixel = int(px / 1000.0 * rgb.width)
-            py_pixel = int(py / 1000.0 * rgb.height)
+            x1 = int(bbox[0] / 1000.0 * rgb.width)
+            y1 = int(bbox[1] / 1000.0 * rgb.height)
+            x2 = int(bbox[2] / 1000.0 * rgb.width)
+            y2 = int(bbox[3] / 1000.0 * rgb.height)
+            cx = (x1 + x2) // 2
+            cy = (y1 + y2) // 2
 
             self.get_logger().info(
-                f"阶段二结果: norm=({px}, {py}) → pixel=({px_pixel}, {py_pixel}) "
-                f"label={label} conf={confidence:.2f}"
+                f"阶段二结果: bbox_norm={bbox} → pixel=[{x1},{y1},{x2},{y2}] "
+                f"center=[{cx},{cy}] label={label} conf={confidence:.2f}"
             )
 
-            Z = get_depth_at_pixel(depth, px_pixel, py_pixel)
+            Z = get_min_depth_in_region(depth, x1, y1, x2, y2)
             if Z is None:
                 self.get_logger().error("阶段二: 深度查询失败")
                 with self._lock:
@@ -328,7 +335,7 @@ class VlmBridge(Node):
                     self._vlm_in_progress = False
                 return
 
-            X_cam, Y_cam, Z_cam = pixel_to_camera_3d(px_pixel, py_pixel, Z, info)
+            X_cam, Y_cam, Z_cam = pixel_to_camera_3d(cx, cy, Z, info)
             pt = transform_point(
                 self._tf_buffer,
                 X_cam, Y_cam, Z_cam,
