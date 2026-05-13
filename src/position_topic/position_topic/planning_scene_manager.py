@@ -6,6 +6,7 @@ Planning Scene 操作封装。
 - 碰撞策略 (allow/forbid collision pairs)
 - 物体附着/脱离 (attach/detach)
 """
+import rclpy
 from rclpy.node import Node
 from moveit_msgs.srv import ApplyPlanningScene
 from moveit_msgs.msg import (
@@ -136,14 +137,13 @@ class PlanningSceneManager:
 
         future = self._apply_cli.call_async(req)
 
-        # time.sleep 循环等结果，不碰 executor API
-        # MultiThreadedExecutor 的其他线程自然处理 service 响应
+        # spin_once 逐次处理响应事件，不抢其他线程的回调
         import time
         deadline = time.time() + 2.0
         while time.time() < deadline:
             if future.done():
                 break
-            time.sleep(0.05)
+            rclpy.spin_once(self._node, timeout_sec=0.01)
 
         if future.done():
             if future.result() is not None:
