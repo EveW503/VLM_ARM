@@ -128,7 +128,7 @@ class PlanningSceneManager:
     # ── 内部 ──────────────────────────────────────
 
     def _call_apply(self, scene, tag):
-        if not self._apply_cli.wait_for_service(timeout_sec=2.0):
+        if not self._apply_cli.wait_for_service(timeout_sec=5.0):
             self._logger.warning(f"ApplyPlanningScene 不可用 ({tag})")
             return False
 
@@ -139,7 +139,7 @@ class PlanningSceneManager:
 
         # spin_once 逐次处理响应事件，不抢其他线程的回调
         import time
-        deadline = time.time() + 2.0
+        deadline = time.time() + 5.0
         while time.time() < deadline:
             if future.done():
                 break
