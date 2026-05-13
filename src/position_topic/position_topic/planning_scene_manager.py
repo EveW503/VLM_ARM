@@ -71,16 +71,13 @@ class PlanningSceneManager:
     # ── 碰撞策略 ──────────────────────────────────
 
     def allow_collision(self, link1, object_id):
-        """
-        允许特定 link 与物体碰撞（如夹爪接触目标时）。
-        """
         scene = PlanningScene()
         scene.is_diff = True
 
-        entry = AllowedCollisionEntry()
-        entry.enabled = [True]
+        entry1 = AllowedCollisionEntry(enabled=[False, True])
+        entry2 = AllowedCollisionEntry(enabled=[True, False])
         scene.allowed_collision_matrix.entry_names = [link1, object_id]
-        scene.allowed_collision_matrix.entry_values = [entry]
+        scene.allowed_collision_matrix.entry_values = [entry1, entry2]
 
         return self._call_apply(scene, f"allow_collision({link1}, {object_id})")
 
@@ -88,10 +85,10 @@ class PlanningSceneManager:
         scene = PlanningScene()
         scene.is_diff = True
 
-        entry = AllowedCollisionEntry()
-        entry.enabled = [False]
+        entry1 = AllowedCollisionEntry(enabled=[False, False])
+        entry2 = AllowedCollisionEntry(enabled=[False, False])
         scene.allowed_collision_matrix.entry_names = [link1, object_id]
-        scene.allowed_collision_matrix.entry_values = [entry]
+        scene.allowed_collision_matrix.entry_values = [entry1, entry2]
 
         return self._call_apply(scene, f"forbid_collision({link1}, {object_id})")
 
