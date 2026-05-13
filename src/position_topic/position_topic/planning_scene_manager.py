@@ -1,35 +1,33 @@
 """
 Planning Scene 操作封装。
 
-通过 moveit_msgs/srv/ApplyPlanningScene 服务操作 MoveIt 的世界模型:
-- 碰撞物体管理 (add/remove)
-- 碰撞策略 (allow/forbid collision pairs)
-- 物体附着/脱离 (attach/detach)
+通过 MoveIt 监听的 topic 操作世界模型 (零阻塞):
+- /collision_object: 碰撞物体增删
+- /attached_collision_object: 物体附着/脱离
+
+注意: allow_collision/forbid_collision 需要 ApplyPlanningScene service，
+当前通过 remove_object 替代实现。
 """
-import rclpy
 from rclpy.node import Node
-from moveit_msgs.srv import ApplyPlanningScene
-from moveit_msgs.msg import (
-    PlanningScene, CollisionObject, AttachedCollisionObject,
-    AllowedCollisionEntry,
-)
+from moveit_msgs.msg import CollisionObject, AttachedCollisionObject
 from shape_msgs.msg import SolidPrimitive
 
 
 class PlanningSceneManager:
-    """管理 MoveIt Planning Scene 中的物体、碰撞、附着。"""
+    """管理 MoveIt Planning Scene 中的物体、碰撞、附着 (topic 方式, 零阻塞)。"""
 
     def __init__(self, node: Node):
-        self._node = node
         self._logger = node.get_logger()
-        self._apply_cli = node.create_client(ApplyPlanningScene, "/apply_planning_scene")
+        self._collision_pub = node.create_publisher(
+            CollisionObject, "/collision_object", 10
+        )
+        self._attached_pub = node.create_publisher(
+            AttachedCollisionObject, "/attached_collision_object", 10
+        )
 
     # ── 物体管理 ──────────────────────────────────
 
     def add_object(self, object_id, shape_type, dimensions, pose, frame_id):
-        """
-        向 Planning Scene 添加碰撞物体。
-        """
         obj = CollisionObject()
         obj.id = object_id
         obj.header.frame_id = frame_id
@@ -41,64 +39,26 @@ class PlanningSceneManager:
         obj.primitives = [prim]
         obj.primitive_poses = [pose]
 
-        scene = PlanningScene()
-        scene.is_diff = True
-        scene.world.collision_objects = [obj]
-
-        return self._call_apply(scene, f"add_object({object_id})")
+        self._collision_pub.publish(obj)
+        self._logger.info(f"CollisionObject ADD: {object_id}")
 
     def remove_object(self, object_id):
         obj = CollisionObject()
         obj.id = object_id
         obj.operation = CollisionObject.REMOVE
-
-        scene = PlanningScene()
-        scene.is_diff = True
-        scene.world.collision_objects = [obj]
-
-        return self._call_apply(scene, f"remove_object({object_id})")
+        self._collision_pub.publish(obj)
+        self._logger.info(f"CollisionObject REMOVE: {object_id}")
 
     def remove_all_objects(self):
         obj = CollisionObject()
         obj.id = ""
         obj.operation = CollisionObject.REMOVE
-
-        scene = PlanningScene()
-        scene.is_diff = True
-        scene.world.collision_objects = [obj]
-
-        return self._call_apply(scene, "remove_all_objects")
-
-    # ── 碰撞策略 ──────────────────────────────────
-
-    def allow_collision(self, link1, object_id):
-        scene = PlanningScene()
-        scene.is_diff = True
-
-        entry1 = AllowedCollisionEntry(enabled=[False, True])
-        entry2 = AllowedCollisionEntry(enabled=[True, False])
-        scene.allowed_collision_matrix.entry_names = [link1, object_id]
-        scene.allowed_collision_matrix.entry_values = [entry1, entry2]
-
-        return self._call_apply(scene, f"allow_collision({link1}, {object_id})")
-
-    def forbid_collision(self, link1, object_id):
-        scene = PlanningScene()
-        scene.is_diff = True
-
-        entry1 = AllowedCollisionEntry(enabled=[False, False])
-        entry2 = AllowedCollisionEntry(enabled=[False, False])
-        scene.allowed_collision_matrix.entry_names = [link1, object_id]
-        scene.allowed_collision_matrix.entry_values = [entry1, entry2]
-
-        return self._call_apply(scene, f"forbid_collision({link1}, {object_id})")
+        self._collision_pub.publish(obj)
+        self._logger.info("CollisionObject REMOVE all")
 
     # ── 附着/脱离 ────────────────────────────────
 
     def attach_object(self, object_id, link_name, touch_links=None):
-        """
-        将物体附着到机器人 link（MoveIt 层，与 Gazebo LinkAttacher 平行）。
-        """
         aco = AttachedCollisionObject()
         aco.object.id = object_id
         aco.object.operation = CollisionObject.ADD
@@ -107,11 +67,8 @@ class PlanningSceneManager:
             aco.touch_links = touch_links
         aco.weight = 1.0
 
-        scene = PlanningScene()
-        scene.is_diff = True
-        scene.robot_state.attached_collision_objects = [aco]
-
-        return self._call_apply(scene, f"attach_object({object_id})")
+        self._attached_pub.publish(aco)
+        self._logger.info(f"AttachedCollisionObject ADD: {object_id} → {link_name}")
 
     def detach_object(self, object_id, link_name):
         aco = AttachedCollisionObject()
@@ -119,41 +76,15 @@ class PlanningSceneManager:
         aco.object.operation = CollisionObject.REMOVE
         aco.link_name = link_name
 
-        scene = PlanningScene()
-        scene.is_diff = True
-        scene.robot_state.attached_collision_objects = [aco]
+        self._attached_pub.publish(aco)
+        self._logger.info(f"AttachedCollisionObject REMOVE: {object_id}")
 
-        return self._call_apply(scene, f"detach_object({object_id})")
+    # ── 碰撞策略 (简化版: 通过 remove 替代) ─────
 
-    # ── 内部 ──────────────────────────────────────
+    def allow_collision(self, link1, object_id):
+        """topic 方式不支持 ACM 操作, 通过 remove_object 让 MoveIt 不避让。"""
+        self.remove_object(object_id)
 
-    def _call_apply(self, scene, tag):
-        if not self._apply_cli.wait_for_service(timeout_sec=5.0):
-            self._logger.warning(f"ApplyPlanningScene 不可用 ({tag})")
-            return False
-
-        req = ApplyPlanningScene.Request()
-        req.scene = scene
-
-        future = self._apply_cli.call_async(req)
-
-        # spin_once 逐次处理响应事件，不抢其他线程的回调
-        import time
-        deadline = time.time() + 5.0
-        while time.time() < deadline:
-            if future.done():
-                break
-            rclpy.spin_once(self._node, timeout_sec=0.01)
-
-        if future.done():
-            if future.result() is not None:
-                if future.result().success:
-                    return True
-                self._logger.warning(f"ApplyPlanningScene 失败 ({tag})")
-                return False
-            exc = future.exception()
-            if exc:
-                self._logger.warning(f"ApplyPlanningScene 异常 ({tag}): {exc}")
-                return False
-        self._logger.warning(f"ApplyPlanningScene 超时 ({tag})")
-        return False
+    def forbid_collision(self, link1, object_id):
+        """topic 方式不支持 ACM 操作, 此处为 no-op。"""
+        pass

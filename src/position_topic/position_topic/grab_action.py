@@ -164,15 +164,12 @@ class GrabAction(Node):
         )
         dims = self.get_parameter("target_object_dims").value
 
-        success = self._psm.add_object(
+        self._psm.add_object(
             "target", shape_type, dims,
             target.pose, target.header.frame_id or "base"
         )
-        if success:
-            self._target_object_registered = True
-            self.get_logger().info("目标物体已注册到 Planning Scene")
-        else:
-            self.get_logger().warning("目标物体注册失败，将使用旧行为")
+        self._target_object_registered = True
+        self.get_logger().info("目标物体已发布到 /collision_object")
 
         self._transition(self.PRE_GRASP_PLAN)
 
@@ -240,19 +237,10 @@ class GrabAction(Node):
         approach_mode = self.get_parameter("approach_mode").value
         self.get_logger().info(f"APPROACH: 碰撞策略 ({approach_mode})...")
 
-        if approach_mode in ("allow", "auto"):
-            ok = self._psm.allow_collision("gripper", "target")
-            if ok:
-                self.get_logger().info("allow_collision 成功")
-            elif approach_mode == "auto":
-                self.get_logger().info("allow_collision 失败, fallback → remove_object")
-                self._psm.remove_object("target")
-                self._target_object_registered = False
-            else:
-                self.get_logger().warning("allow_collision 失败")
-        elif approach_mode == "remove":
-            self._psm.remove_object("target")
-            self._target_object_registered = False
+        # 从 planning scene 移除目标，让 MoveIt 不再避让
+        self._psm.remove_object("target")
+        self._target_object_registered = False
+        self.get_logger().info("目标已从 Planning Scene 移除")
 
         self._plan_approach()
 
