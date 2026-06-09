@@ -22,6 +22,7 @@ from moveit_msgs.msg import (
     BoundingVolume, Constraints, MotionPlanRequest,
     PlanningOptions, PositionConstraint,
 )
+from moveit_msgs.srv import GetCartesianPath
 from shape_msgs.msg import SolidPrimitive
 from linkattacher_msgs.srv import AttachLink, DetachLink
 from control_msgs.action import FollowJointTrajectory
@@ -51,12 +52,13 @@ class GrabAction(Node):
         self.declare_parameter("pre_grasp_z_offset", 0.08)
         self.declare_parameter("gripper_close_pos", -0.17)
         self.declare_parameter("gripper_open_pos", 0.5)
-        self.declare_parameter("stage2_timeout", 10.0)
         self.declare_parameter("planning_time", 5.0)
         self.declare_parameter("velocity_scaling", 0.3)
         self.declare_parameter("approach_mode", "auto")
         self.declare_parameter("target_object_shape", "BOX")
         self.declare_parameter("target_object_dims", [0.03, 0.03, 0.03])
+        self.declare_parameter("jaw_clearance", 0.03)
+        self.declare_parameter("stage2_timeout", 3.0)
 
         # --- Planning Scene Manager ---
         self._psm = PlanningSceneManager(self)
@@ -84,6 +86,12 @@ class GrabAction(Node):
         # --- Gripper action client ---
         self._gripper_action = ActionClient(
             self, FollowJointTrajectory, "/gripper_controller/follow_joint_trajectory"
+        )
+
+        # --- Cartesian path service + arm trajectory execution ---
+        self._cartesian_cli = self.create_client(GetCartesianPath, "/compute_cartesian_path")
+        self._arm_traj_action = ActionClient(
+            self, FollowJointTrajectory, "/arm_controller/follow_joint_trajectory"
         )
 
         # --- 状态机 ---
@@ -114,6 +122,7 @@ class GrabAction(Node):
             f"{msg.pose.position.y:.3f}, {msg.pose.position.z:.3f})"
         )
         self._grasp_target = msg
+        self._grasp_target.pose.position.z += self.get_parameter("jaw_clearance").value
         if self._state == self.AWAIT_STAGE2:
             if self._stage2_timer is not None:
                 self.destroy_timer(self._stage2_timer)
@@ -141,6 +150,12 @@ class GrabAction(Node):
         elif new_state == self.FAILED:
             self.get_logger().error("抓取流程失败")
             self._publish_status("error")
+            if self._target_object_registered:
+                self._psm.remove_object("target")
+                self._target_object_registered = False
+            if self._stage2_timer is not None:
+                self.destroy_timer(self._stage2_timer)
+                self._stage2_timer = None
             self._state = self.IDLE
 
     def _publish_status(self, status):
@@ -149,9 +164,16 @@ class GrabAction(Node):
     # ── SETUP ─────────────────────────────────────
 
     def _do_setup(self):
-        """注册目标物体到 Planning Scene，触发 vlm_bridge stage 2。"""
-        self.get_logger().info("SETUP: 注册目标物体到 Planning Scene...")
+        try:
+            self._do_setup_impl()
+        except Exception as exc:
+            self.get_logger().error(f"SETUP 异常: {exc}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+            self._transition(self.FAILED)
 
+    def _do_setup_impl(self):
+        self.get_logger().info("SETUP: 注册目标物体到 Planning Scene...")
         target = self._pre_grasp_target
         if target is None:
             self._transition(self.FAILED)
@@ -164,13 +186,21 @@ class GrabAction(Node):
         )
         dims = self.get_parameter("target_object_dims").value
 
+        # VLM Z = 物体上表面 → Planning Scene 中心 = Z - 半高
+        obj_pose = Pose()
+        obj_pose.position = Point(
+            x=target.pose.position.x,
+            y=target.pose.position.y,
+            z=target.pose.position.z - dims[2] / 2.0,
+        )
+        obj_pose.orientation = target.pose.orientation
+
         self._psm.add_object(
             "target", shape_type, dims,
-            target.pose, target.header.frame_id or "base"
+            obj_pose, target.header.frame_id or "base"
         )
         self._target_object_registered = True
-        self.get_logger().info("目标物体已发布到 /collision_object")
-
+        self.get_logger().info(f"目标已注册 (中心 Z={obj_pose.position.z:.3f})")
         self._transition(self.PRE_GRASP_PLAN)
 
     # ── 预抓取 ──────────────────────────────────────
@@ -213,7 +243,7 @@ class GrabAction(Node):
         self._stage2_timer = None
         if self._grasp_target is None:
             t = self._pre_grasp_target
-            fb_z = t.pose.position.z - self.get_parameter("pre_grasp_z_offset").value
+            fb_z = t.pose.position.z + self.get_parameter("jaw_clearance").value
             self._grasp_target = PoseStamped()
             self._grasp_target.header.frame_id = "base"
             self._grasp_target.pose = Pose(
@@ -245,17 +275,86 @@ class GrabAction(Node):
         self._plan_approach()
 
     def _plan_approach(self):
-        self.get_logger().info("规划接近路径 (物体不再遮挡)...")
+        """Cartesian 直线下移——确保末端垂直到达目标。"""
+        self.get_logger().info("规划 Cartesian 接近路径...")
         if self._grasp_target is None:
             self._transition(self.FAILED)
             return
 
-        self._send_move_request(
-            self._grasp_target.pose, self._grasp_target.header.frame_id or "base",
-            success_callback=self._on_approach_done,
-            fail_callback=lambda: self._transition(self.FAILED),
-        )
+        if not self._cartesian_cli.wait_for_service(timeout_sec=3.0):
+            self.get_logger().error("compute_cartesian_path 不可用")
+            self._transition(self.FAILED)
+            return
 
+        req = GetCartesianPath.Request()
+        req.header.stamp = self.get_clock().now().to_msg()
+        req.header.frame_id = self._grasp_target.header.frame_id or "base"
+        req.group_name = "arm"
+        req.link_name = "gripper"
+        req.waypoints = [self._grasp_target.pose]
+        req.max_step = 0.005
+        req.avoid_collisions = True
+
+        future = self._cartesian_cli.call_async(req)
+        import time
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            if future.done():
+                break
+            rclpy.spin_once(self, timeout_sec=0.01)
+
+        if not future.done():
+            self.get_logger().error("compute_cartesian_path 超时")
+            self._transition(self.FAILED)
+            return
+
+        resp = future.result()
+        if resp is None or resp.error_code.val != 1:
+            frac = resp.fraction if resp else 0.0
+            self.get_logger().error(f"Cartesian 路径规划失败, fraction={frac:.2f}")
+            self._transition(self.FAILED)
+            return
+
+        self.get_logger().info(f"Cartesian 路径规划成功, fraction={resp.fraction:.2f}")
+        self._execute_cartesian_trajectory(resp.solution.joint_trajectory)
+
+    def _execute_cartesian_trajectory(self, joint_trajectory):
+        if not self._arm_traj_action.wait_for_server(timeout_sec=2.0):
+            self.get_logger().error("arm_controller action 不可用")
+            self._transition(self.FAILED)
+            return
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory = joint_trajectory
+        send_future = self._arm_traj_action.send_goal_async(goal)
+        send_future.add_done_callback(self._on_cartesian_exec_done)
+
+    def _on_cartesian_exec_done(self, future):
+        try:
+            goal_handle = future.result()
+        except Exception as exc:
+            self.get_logger().error(f"发送 Cartesian 轨迹失败: {exc}")
+            self._transition(self.FAILED)
+            return
+        if not goal_handle.accepted:
+            self.get_logger().warning("arm_controller 拒绝 Cartesian 轨迹")
+            self._transition(self.FAILED)
+            return
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(self._on_cartesian_result)
+
+    def _on_cartesian_result(self, future):
+        try:
+            wrapped = future.result()
+        except Exception as exc:
+            self.get_logger().error(f"Cartesian 执行失败: {exc}")
+            self._transition(self.FAILED)
+            return
+        if wrapped.result.error_code == 0:
+            self.get_logger().info("Cartesian 接近完成")
+            self._on_approach_done()
+        else:
+            self.get_logger().warning(f"Cartesian 执行失败: {wrapped.result.error_string}")
+            self._transition(self.FAILED)
     def _on_approach_done(self):
         self.get_logger().info("到达抓取位姿")
         self._transition(self.GRASP)

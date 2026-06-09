@@ -65,7 +65,7 @@ def generate_launch_description():
         arguments=[
             "-entity", "target_box",
             "-file", target_file,
-            '-x', '0.20', '-y', '0.0', '-z', '0.19'
+            '-x', '0.15', '-y', '0.0', '-z', '0.20'
         ],
         output="screen"
     )
@@ -98,6 +98,7 @@ def generate_launch_description():
 
     # 3. 模拟 Orbbec 的光学坐标系转换 (非常标准的光学坐标系法则)
     camera_optical_tf = Node(
+        
          package="tf2_ros",
          executable="static_transform_publisher",
          arguments=[

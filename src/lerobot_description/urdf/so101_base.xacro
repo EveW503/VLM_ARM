@@ -377,7 +377,7 @@
 		<parent link="wrist" />
 		<child link="gripper" />
 		<axis xyz="0 0 1" />
-		<limit effort="10" velocity="10" lower="-2.79253" upper="2.79253" />
+		<limit effort="10" velocity="10" lower="-2.94" upper="2.94" />
 	</joint>
 
 	<transmission name="5_trans">
@@ -397,7 +397,7 @@
 		<parent link="lower_arm" />
 		<child link="wrist" />
 		<axis xyz="0 0 1" />
-		<limit effort="10" velocity="10" lower="-1.65806" upper="1.65806" />
+		<limit effort="10" velocity="10" lower="-1.80" upper="1.80" />
 	</joint>
 
 	<transmission name="4_trans">
