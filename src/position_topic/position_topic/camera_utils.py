@@ -163,7 +163,7 @@ def transform_point(tf_buffer, x, y, z, source_frame, target_frame, timeout_sec=
         return None
 
 
-# ee_camera mount pitch: origin_rpy="0 0.5 0" → ee_cam_X 相对 gripper_X 下倾 0.5 rad
+# ee_camera mount pitch: origin_rpy="0 -0.5 0" → ee_cam_X 相对 gripper_X 下倾 0.5 rad
 _CAMERA_PITCH = 0.5
 
 
