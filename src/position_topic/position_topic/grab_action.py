@@ -35,8 +35,9 @@ class GrabAction(Node):
     # 状态常量
     IDLE = "idle"
     SETUP = "setup"
-    PRE_GRASP_PLAN = "pre_grasp_plan"
+    MOVE_TO_OBSERVE = "move_to_observe"
     AWAIT_STAGE2 = "await_stage2"
+    PRE_GRASP = "pre_grasp"
     APPROACH = "approach"
     GRASP = "grasp"
     LIFT_PLAN = "lift_plan"
@@ -70,6 +71,9 @@ class GrabAction(Node):
         self.create_subscription(
             PoseStamped, "/target_pose", self._target_pose_cb, 10
         )
+        self.create_subscription(
+            PoseStamped, "/target_observation_pose", self._observation_pose_cb, 10
+        )
 
         # --- 状态反馈 ---
         self._status_pub = self.create_publisher(String, "/grab_status", 10)
@@ -96,8 +100,9 @@ class GrabAction(Node):
 
         # --- 状态机 ---
         self._state = self.IDLE
-        self._pre_grasp_target = None
-        self._grasp_target = None
+        self._pre_grasp_target = None   # P_rough, 用于碰撞物体注册和降级回退
+        self._observation_pose = None   # P_obs, 观察位姿
+        self._grasp_target = None       # P_precise, 阶段二精确定位
         self._stage2_timer = None
         self._target_object_registered = False
 
@@ -106,14 +111,31 @@ class GrabAction(Node):
     # ── 回调 ──────────────────────────────────────────
 
     def _pre_grasp_cb(self, msg):
-        if self._state == self.IDLE:
-            self.get_logger().info(
-                f"收到预抓取目标: ({msg.pose.position.x:.3f}, "
-                f"{msg.pose.position.y:.3f}, {msg.pose.position.z:.3f})"
-            )
-            self._pre_grasp_target = msg
+        """接收 P_rough (粗定位坐标), 存储供 SETUP 注册和降级回退使用。"""
+        self.get_logger().info(
+            f"收到粗定位 P_rough: ({msg.pose.position.x:.3f}, "
+            f"{msg.pose.position.y:.3f}, {msg.pose.position.z:.3f})"
+        )
+        self._pre_grasp_target = msg
+        # 如果观察位姿已到达且状态机仍在 IDLE, 触发 SETUP
+        if self._state == self.IDLE and self._observation_pose is not None:
             self._grasp_target = None
             self._target_object_registered = False
+            self._transition(self.SETUP)
+
+    def _observation_pose_cb(self, msg):
+        """接收观察位姿 (P_obs), 触发状态机。"""
+        if self._state != self.IDLE:
+            return
+        self.get_logger().info(
+            f"收到观察位姿: pos=({msg.pose.position.x:.3f}, "
+            f"{msg.pose.position.y:.3f}, {msg.pose.position.z:.3f})"
+        )
+        self._observation_pose = msg
+        self._grasp_target = None
+        self._target_object_registered = False
+        # 如果 P_rough 已到达, 触发 SETUP
+        if self._pre_grasp_target is not None:
             self._transition(self.SETUP)
 
     def _target_pose_cb(self, msg):
@@ -127,7 +149,7 @@ class GrabAction(Node):
             if self._stage2_timer is not None:
                 self.destroy_timer(self._stage2_timer)
                 self._stage2_timer = None
-            self._transition(self.APPROACH)
+            self._transition(self.PRE_GRASP)
 
     # ── 状态机驱动 ────────────────────────────────────
 
@@ -135,7 +157,9 @@ class GrabAction(Node):
         self._state = new_state
         if new_state == self.SETUP:
             self._do_setup()
-        elif new_state == self.PRE_GRASP_PLAN:
+        elif new_state == self.MOVE_TO_OBSERVE:
+            self._do_move_to_observe()
+        elif new_state == self.PRE_GRASP:
             self._plan_pre_grasp()
         elif new_state == self.APPROACH:
             self._do_approach()
@@ -201,34 +225,29 @@ class GrabAction(Node):
         )
         self._target_object_registered = True
         self.get_logger().info(f"目标已注册 (中心 Z={obj_pose.position.z:.3f})")
-        self._transition(self.PRE_GRASP_PLAN)
+        self._transition(self.MOVE_TO_OBSERVE)
 
-    # ── 预抓取 ──────────────────────────────────────
+    # ── 观察位姿移动 ───────────────────────────────
 
-    def _plan_pre_grasp(self):
-        self.get_logger().info("规划预抓取位姿 (物体在 scene → MoveIt 绕行)...")
-        target = self._pre_grasp_target
-        if target is None:
+    def _do_move_to_observe(self):
+        """MoveIt 规划并移动机械臂到斜上方观察点。"""
+        self.get_logger().info("MOVE_TO_OBSERVE: 移动到斜上方观察点...")
+        obs = self._observation_pose
+        if obs is None:
             self._transition(self.FAILED)
             return
 
-        pre_grasp_pose = Pose()
-        pre_grasp_pose.position = Point(
-            x=target.pose.position.x,
-            y=target.pose.position.y,
-            z=target.pose.position.z + self.get_parameter("pre_grasp_z_offset").value,
-        )
-        pre_grasp_pose.orientation = Quaternion(w=1.0)
-
         self._send_move_request(
-            pre_grasp_pose, "base",
-            success_callback=self._on_pre_grasp_done,
+            obs.pose, obs.header.frame_id or "base",
+            success_callback=self._on_observe_done,
             fail_callback=lambda: self._transition(self.FAILED),
+            use_orientation=True,
         )
 
-    def _on_pre_grasp_done(self):
-        self.get_logger().info("预抓取完成, 等待阶段二精定位...")
-        self._publish_status("stage1_done")
+    def _on_observe_done(self):
+        """到达观察点后, 触发阶段二 VLM 近景精定位。"""
+        self.get_logger().info("已到达观察位姿, 触发阶段二精定位...")
+        self._publish_status("ready_for_stage2")
         self._state = self.AWAIT_STAGE2
         self._stage2_timer = self.create_timer(
             self.get_parameter("stage2_timeout").value,
@@ -250,7 +269,46 @@ class GrabAction(Node):
                 position=Point(x=t.pose.position.x, y=t.pose.position.y, z=fb_z),
                 orientation=Quaternion(w=1.0),
             )
-        self._transition(self.APPROACH)
+        self._transition(self.PRE_GRASP)
+
+    # ── 预抓取 (精确目标正上方) ─────────────────────
+
+    def _plan_pre_grasp(self):
+        """移动到 P_precise 正上方, 末端垂直向下。"""
+        self.get_logger().info("PRE_GRASP: 移动到精确目标正上方...")
+
+        if self._grasp_target is None:
+            self._transition(self.FAILED)
+            return
+
+        # 从 planning scene 移除目标，让 MoveIt 不再避让（即将靠近目标）
+        if self._target_object_registered:
+            self._psm.remove_object("target")
+            self._target_object_registered = False
+            self.get_logger().info("目标已从 Planning Scene 移除")
+
+        z_offset = self.get_parameter("pre_grasp_z_offset").value
+
+        pre_grasp_pose = Pose()
+        pre_grasp_pose.position = Point(
+            x=self._grasp_target.pose.position.x,
+            y=self._grasp_target.pose.position.y,
+            z=self._grasp_target.pose.position.z + z_offset,
+        )
+        # 末端垂直向下: 绕 Y 轴旋转 -90°
+        import math
+        half_pi_2 = math.sin(-math.pi / 4.0)
+        half_pi_2_cos = math.cos(-math.pi / 4.0)
+        pre_grasp_pose.orientation = Quaternion(
+            x=0.0, y=half_pi_2, z=0.0, w=half_pi_2_cos,
+        )
+
+        self._send_move_request(
+            pre_grasp_pose, self._grasp_target.header.frame_id or "base",
+            success_callback=lambda: self._transition(self.APPROACH),
+            fail_callback=lambda: self._transition(self.FAILED),
+            use_orientation=True,
+        )
 
     # ── 接近 ──────────────────────────────────────
 
