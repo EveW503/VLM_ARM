@@ -55,8 +55,9 @@ class VlmClient:
             max_tokens: int, 最大输出 token 数
 
         Returns:
-            dict 或 None: 解析后的 JSON 响应, 格式:
-                {"target": {"pixel_x": int, "pixel_y": int, "label": str, "confidence": float}}
+            dict 或 None: 解析后的 JSON 响应.
+                阶段一格式: {"targets": [...], "obstacles": [...]}
+                阶段二格式: {"target": {"bbox": [...], "label": str, "confidence": float}}
             失败时返回 None
         """
         try:

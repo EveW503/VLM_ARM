@@ -4,6 +4,7 @@ VLM Bridge 节点: 双阶段 VLM 推理 + 2D→3D 映射 + 目标位姿发布。
 阶段一: Gemini 335 全局推理 → 粗定位 → /target_pre_grasp
 阶段二: ee_camera 近距精定位 → /target_pose
 """
+import json
 import threading
 
 import rclpy
@@ -216,12 +217,12 @@ class VlmBridge(Node):
                 self._handle_grab_error()
 
     def _handle_grab_error(self):
-        """处理抓取失败: 递增失败计数，如果超阈值则跳过该目标。"""
+        """处理抓取失败: 递增失败计数，如果超阈值则加入黑名单。"""
         if self._current_target_idx < len(self._targets_pool):
             target = self._targets_pool[self._current_target_idx]
             label = target.get("label", "unknown")
             bbox = target.get("bbox", [0, 0, 0, 0])
-            target_key = f"{label}_{bbox[0]}_{bbox[1]}"
+            target_key = f"{label}_{bbox[0]}_{bbox[1]}_{bbox[2]}_{bbox[3]}"
 
             count = self._target_fail_counts.get(target_key, 0) + 1
             self._target_fail_counts[target_key] = count
@@ -233,21 +234,10 @@ class VlmBridge(Node):
                     f"目标 '{label}' 连续失败 3 次, 加入黑名单"
                 )
                 self._target_blacklist.add(target_key)
-                self._current_target_idx += 1
 
-                if self._current_target_idx >= len(self._targets_pool):
-                    self.get_logger().warning("所有目标已尝试, 重新 Stage1")
-                    self._targets_pool = []
-                    self._current_target_idx = 0
-                    self._state = self.STAGE1_QUERY
-                else:
-                    self.get_logger().info("尝试下一个目标")
-                    self._state = self.STAGE1_QUERY
-            else:
-                self.get_logger().info(f"重试同一目标 '{label}' ({count}/3)")
-                self._state = self.STAGE1_QUERY
-        else:
-            self._state = self.STAGE_IDLE
+            # 重新 Stage1 = rank_targets 会再次排序，黑名单目标被 process_current_target 跳过
+            self.get_logger().info("重新 Stage1 以选择下一个目标")
+        self._state = self.STAGE1_QUERY
         self._vlm_in_progress = False
         self._pending_publish = None
         self._pending_rough = None
@@ -385,114 +375,120 @@ class VlmBridge(Node):
         Returns:
             bool: True 如果目标处理成功并已发布
         """
-        if self._current_target_idx >= len(self._targets_pool):
-            self.get_logger().warning("targets_pool 已耗尽, 需要重新 Stage1")
-            return False
+        while self._current_target_idx < len(self._targets_pool):
+            target = self._targets_pool[self._current_target_idx]
+            bbox = target.get("bbox", [-1, -1, -1, -1])
+            confidence = target.get("confidence", 0.0)
+            label = target.get("label", "unknown")
+            direction = target.get("optimal_approach_direction", "top")
+            material = target.get("material", "soft")
+            ripeness = target.get("ripeness", "unripe")
+            obstacle_above = target.get("obstacle_above", "none")
 
-        target = self._targets_pool[self._current_target_idx]
-        bbox = target.get("bbox", [-1, -1, -1, -1])
-        confidence = target.get("confidence", 0.0)
-        label = target.get("label", "unknown")
-        direction = target.get("optimal_approach_direction", "top")
-        material = target.get("material", "soft")
-        ripeness = target.get("ripeness", "unripe")
-        obstacle_above = target.get("obstacle_above", "none")
+            # Check blacklist
+            target_key = f"{label}_{bbox[0]}_{bbox[1]}_{bbox[2]}_{bbox[3]}"
+            if target_key in self._target_blacklist:
+                self.get_logger().info(f"目标 {label} 在黑名单中, 跳过")
+                self._current_target_idx += 1
+                continue
 
-        if bbox[0] < 0:
-            self.get_logger().warning(f"目标 {label} bbox 无效, 跳过")
-            self._current_target_idx += 1
-            return self._process_current_target(rgb, depth, info)
+            if bbox[0] < 0:
+                self.get_logger().warning(f"目标 {label} bbox 无效, 跳过")
+                self._current_target_idx += 1
+                continue
 
-        # Qwen3-VL bbox 坐标转换 [0,1000] → 像素
-        x1 = int(bbox[0] / 1000.0 * rgb.width)
-        y1 = int(bbox[1] / 1000.0 * rgb.height)
-        x2 = int(bbox[2] / 1000.0 * rgb.width)
-        y2 = int(bbox[3] / 1000.0 * rgb.height)
-        cx = (x1 + x2) // 2
-        cy = (y1 + y2) // 2
+            # Qwen3-VL bbox 坐标转换 [0,1000] → 像素
+            x1 = int(bbox[0] / 1000.0 * rgb.width)
+            y1 = int(bbox[1] / 1000.0 * rgb.height)
+            x2 = int(bbox[2] / 1000.0 * rgb.width)
+            y2 = int(bbox[3] / 1000.0 * rgb.height)
+            cx = (x1 + x2) // 2
+            cy = (y1 + y2) // 2
 
-        self.get_logger().info(
-            f"选中目标 [{self._current_target_idx}/{len(self._targets_pool)}]: "
-            f"{label} ripeness={ripeness} material={material} "
-            f"obstacle={obstacle_above} dir={direction} conf={confidence:.2f}"
-        )
-
-        Z = get_min_depth_in_region(depth, x1, y1, x2, y2)
-        if Z is None:
-            self.get_logger().error(f"目标 {label} 深度查询失败")
-            self._current_target_idx += 1
-            return self._process_current_target(rgb, depth, info)
-
-        X_cam, Y_cam, Z_cam = pixel_to_camera_3d(cx, cy, Z, info)
-        pt = transform_point(
-            self._tf_buffer,
-            X_cam, Y_cam, Z_cam,
-            "camera_depth_optical_frame", "base",
-        )
-        if pt is None:
-            self.get_logger().error(f"目标 {label} TF 变换失败")
-            self._current_target_idx += 1
-            return self._process_current_target(rgb, depth, info)
-
-        p_rough = pt
-        self.get_logger().info(
-            f"3D rough (base): ({p_rough[0]:.4f}, {p_rough[1]:.4f}, {p_rough[2]:.4f})"
-        )
-
-        # 方位偏移 → 观察点
-        DIRECTION_OFFSETS = {
-            "front":       (-0.06,  0.00,  0.10),
-            "left":        ( 0.00,  0.08,  0.10),
-            "right":       ( 0.00, -0.08,  0.10),
-            "front_left":  (-0.05,  0.06,  0.10),
-            "front_right": (-0.05, -0.06,  0.10),
-            "top":         ( 0.00,  0.00,  0.15),
-        }
-        offset = DIRECTION_OFFSETS.get(direction, DIRECTION_OFFSETS["top"])
-
-        obs_x = p_rough[0] + offset[0]
-        obs_y = p_rough[1] + offset[1]
-        obs_z = p_rough[2] + offset[2]
-
-        if obs_x < 0.10:
-            self.get_logger().warn(
-                f"观察点 X={obs_x:.3f} 进入基座死区, 强制钳制至 X=0.10"
+            self.get_logger().info(
+                f"选中目标 [{self._current_target_idx}/{len(self._targets_pool)}]: "
+                f"{label} ripeness={ripeness} material={material} "
+                f"obstacle={obstacle_above} dir={direction} conf={confidence:.2f}"
             )
-            obs_x = 0.10
 
-        p_obs = (obs_x, obs_y, obs_z)
-        q = compute_lookat_quaternion(p_obs, p_rough)
-        if q is None:
-            self.get_logger().error("LookAt 四元数计算失败, 降级为 identity")
-            q = (0.0, 0.0, 0.0, 1.0)
+            Z = get_min_depth_in_region(depth, x1, y1, x2, y2)
+            if Z is None:
+                self.get_logger().error(f"目标 {label} 深度查询失败")
+                self._current_target_idx += 1
+                continue
 
-        self.get_logger().info(
-            f"观察位姿 (base): pos=({p_obs[0]:.4f}, {p_obs[1]:.4f}, {p_obs[2]:.4f})"
-        )
+            X_cam, Y_cam, Z_cam = pixel_to_camera_3d(cx, cy, Z, info)
+            pt = transform_point(
+                self._tf_buffer,
+                X_cam, Y_cam, Z_cam,
+                "camera_depth_optical_frame", "base",
+            )
+            if pt is None:
+                self.get_logger().error(f"目标 {label} TF 变换失败")
+                self._current_target_idx += 1
+                continue
 
-        with self._lock:
+            p_rough = pt
+            self.get_logger().info(
+                f"3D rough (base): ({p_rough[0]:.4f}, {p_rough[1]:.4f}, {p_rough[2]:.4f})"
+            )
+
+            # 方位偏移 → 观察点
+            DIRECTION_OFFSETS = {
+                "front":       (-0.06,  0.00,  0.10),
+                "left":        ( 0.00,  0.08,  0.10),
+                "right":       ( 0.00, -0.08,  0.10),
+                "front_left":  (-0.05,  0.06,  0.10),
+                "front_right": (-0.05, -0.06,  0.10),
+                "top":         ( 0.00,  0.00,  0.15),
+            }
+            offset = DIRECTION_OFFSETS.get(direction, DIRECTION_OFFSETS["top"])
+
+            obs_x = p_rough[0] + offset[0]
+            obs_y = p_rough[1] + offset[1]
+            obs_z = p_rough[2] + offset[2]
+
+            if obs_x < 0.10:
+                self.get_logger().warn(
+                    f"观察点 X={obs_x:.3f} 进入基座死区, 强制钳制至 X=0.10"
+                )
+                obs_x = 0.10
+
+            p_obs = (obs_x, obs_y, obs_z)
+            q = compute_lookat_quaternion(p_obs, p_rough)
+            if q is None:
+                self.get_logger().error("LookAt 四元数计算失败, 降级为 identity")
+                q = (0.0, 0.0, 0.0, 1.0)
+
+            self.get_logger().info(
+                f"观察位姿 (base): pos=({p_obs[0]:.4f}, {p_obs[1]:.4f}, {p_obs[2]:.4f})"
+            )
+
+            with self._lock:
+                if not self._dry_run:
+                    self._pending_publish = (
+                        "observation",
+                        Point(x=p_obs[0], y=p_obs[1], z=p_obs[2]),
+                        q,
+                    )
+                    self._pending_rough = (
+                        "pre_grasp",
+                        Point(x=p_rough[0], y=p_rough[1], z=p_rough[2]),
+                    )
+                self._state = self.STAGE1_WAIT
+                self._vlm_in_progress = False
+
+            # 发布元数据
             if not self._dry_run:
-                self._pending_publish = (
-                    "observation",
-                    Point(x=p_obs[0], y=p_obs[1], z=p_obs[2]),
-                    q,
-                )
-                self._pending_rough = (
-                    "pre_grasp",
-                    Point(x=p_rough[0], y=p_rough[1], z=p_rough[2]),
-                )
-            self._state = self.STAGE1_WAIT
-            self._vlm_in_progress = False
+                self._publish_metadata(material, obstacle_above, direction, ripeness, label)
 
-        # 发布元数据
-        if not self._dry_run:
-            self._publish_metadata(material, obstacle_above, direction, ripeness, label)
+            return True
 
-        return True
+        self.get_logger().warning("targets_pool 已耗尽, 需要重新 Stage1")
+        return False
 
     def _publish_metadata(self, material, obstacle_above, direction, ripeness, label):
         """发布当前目标的语义元数据到 /target_metadata。"""
-        import json
         meta = {
             "material": material,
             "obstacle_above": obstacle_above,
