@@ -64,7 +64,7 @@
                     <ros>
                         <namespace>so101/camera</namespace>
                     </ros>
-                    <frame_name>camera_optical_link</frame_name>
+                    <frame_name>ee_camera_optical_link</frame_name>
                     
                     <min_depth>0.05</min_depth>
                     <max_depth>8.0</max_depth>
