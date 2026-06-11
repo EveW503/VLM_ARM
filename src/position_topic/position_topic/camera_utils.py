@@ -177,7 +177,6 @@ def compute_lookat_quaternion(p_obs, p_target):
     Returns:
         tuple: (qx, qy, qz, qw) 四元数, 或 None (计算失败时, 如两点重合)
     """
-    import numpy as np
     from scipy.spatial.transform import Rotation
 
     p_obs = np.asarray(p_obs, dtype=np.float64)
