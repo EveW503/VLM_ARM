@@ -28,6 +28,37 @@ from .prompts import (
 from .vlm_client import VlmClient
 
 
+# ── 目标排序 ─────────────────────────────────────────
+
+RIPENESS_ORDER = {"ripe": 0, "overripe": 1, "unripe": 2}
+OBSTACLE_ORDER = {"none": 0, "leaf": 1, "stem": 2}
+
+
+def rank_targets(targets):
+    """
+    对 VLM 返回的目标列表按优先级排序。
+
+    排序 key: 成熟度(ripe优先) > 上方无障碍 > 置信度高 > 原始索引
+
+    Args:
+        targets: list[dict], 每个 dict 包含:
+            ripeness (str), obstacle_above (str), confidence (float)
+
+    Returns:
+        list[dict]: 排序后的目标列表 (最优在前)
+    """
+    def _sort_key(item):
+        idx, t = item
+        ripeness_score = RIPENESS_ORDER.get(t.get("ripeness", "unripe"), 2)
+        obstacle_score = OBSTACLE_ORDER.get(t.get("obstacle_above", "leaf"), 2)
+        # 置信度取负值 → 高置信度排前面
+        return (ripeness_score, obstacle_score, -t.get("confidence", 0.0), idx)
+
+    indexed = list(enumerate(targets))
+    indexed.sort(key=_sort_key)
+    return [t for _, t in indexed]
+
+
 class VlmBridge(Node):
     STAGE_IDLE = "idle"
     STAGE1_QUERY = "stage1_query"
