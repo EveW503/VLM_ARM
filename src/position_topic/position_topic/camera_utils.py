@@ -161,3 +161,47 @@ def transform_point(tf_buffer, x, y, z, source_frame, target_frame, timeout_sec=
     except Exception as exc:
         _logger.warning(f"TF transform failed: {source_frame}→{target_frame}: {exc}")
         return None
+
+
+def compute_lookat_quaternion(p_obs, p_target):
+    """
+    计算从观察点 p_obs 指向目标点 p_target 的四元数。
+
+    生成的姿态使相机/夹爪的 Z 轴对准目标方向，X 轴保持水平。
+    用于机械臂移动到斜上方观察点时计算末端姿态。
+
+    Args:
+        p_obs: (3,) array-like, 观察点坐标 [x, y, z] (米)
+        p_target: (3,) array-like, 目标点坐标 [x, y, z] (米)
+
+    Returns:
+        tuple: (qx, qy, qz, qw) 四元数, 或 None (计算失败时, 如两点重合)
+    """
+    import numpy as np
+    from scipy.spatial.transform import Rotation
+
+    p_obs = np.asarray(p_obs, dtype=np.float64)
+    p_target = np.asarray(p_target, dtype=np.float64)
+
+    direction = p_target - p_obs
+    norm = np.linalg.norm(direction)
+    if norm < 1e-9:
+        return None
+    z_axis = direction / norm
+
+    # 世界 Z 轴向上, 用作"上方向"参考
+    world_up = np.array([0.0, 0.0, 1.0])
+
+    # 当 z_axis 几乎平行于 world_up 时 (正上方俯视), 换用备选参考轴
+    if abs(np.dot(z_axis, world_up)) > 0.999:
+        world_up = np.array([1.0, 0.0, 0.0])
+
+    x_axis = np.cross(world_up, z_axis)
+    x_axis = x_axis / np.linalg.norm(x_axis)
+
+    y_axis = np.cross(z_axis, x_axis)
+
+    R = np.column_stack([x_axis, y_axis, z_axis])
+    r = Rotation.from_matrix(R)
+    q = r.as_quat()  # scipy 返回 [x, y, z, w]
+    return (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
