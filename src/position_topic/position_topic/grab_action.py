@@ -11,6 +11,7 @@ Grab Action 节点: 抓取全流程状态机。
 
 订阅 /target_pre_grasp (阶段一粗定位) 和 /target_pose (阶段二精定位).
 """
+import json
 import math
 import time
 import traceback
@@ -167,7 +168,6 @@ class GrabAction(Node):
 
     def _metadata_cb(self, msg):
         """接收当前目标的语义元数据。"""
-        import json
         try:
             self._target_metadata = json.loads(msg.data)
             self.get_logger().info(
@@ -409,7 +409,8 @@ class GrabAction(Node):
         from .push_sweep import generate_sweep_waypoints
 
         if self._grasp_target is None:
-            self._transition(self.FAILED)
+            self.get_logger().error("PUSH_SWEEP: _grasp_target is None, 降级为 APPROACH")
+            self._transition(self.APPROACH)
             return
 
         direction = self._target_metadata.get(
