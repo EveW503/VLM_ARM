@@ -106,9 +106,9 @@ IDLE → SETUP → MOVE_TO_OBSERVE → AWAIT_STAGE2 → PRE_GRASP → APPROACH
 
 ## 已知未解决问题
 
-- **相机朝向**: 已通过 URDF 光学帧 RPY 解析推导出正确轴映射 (2026-06-12)，`compute_lookat_quaternion` 已重写去除 Ry(-π/2) hack。**待 Gazebo 实测验证**。
+- **相机朝向**: ✅ 已解决 (2026-06-12)。关键发现: Gazebo depth camera 渲染轴为 optical X (红)，非 optical Z (蓝)。`compute_lookat_quaternion` 已修正为 optical X 对准目标。
 - **相机位置**: X+ 和 Y/Z 轴偏移效果未全部测试完成。
-- **PRE_GRASP 朝向**: `Ry(-90°)` 使 gripper X (approach direction) 指向世界 -Z，与轴映射自洽。待实测验证指尖方向是否正确。
+- **PRE_GRASP 朝向**: `Ry(-90°)` 使 gripper X (approach direction) 指向世界 -Z。待实测验证指尖方向是否与夹爪物理匹配。
 
 ## 调试常用命令
 
