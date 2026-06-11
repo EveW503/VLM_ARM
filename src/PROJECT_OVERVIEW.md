@@ -162,10 +162,13 @@ position_topic/
 │   ├── vlm_client.py                 # VLM API 封装：图像编码 + DashScope 调用 + JSON 解析
 │   ├── camera_utils.py               # 相机工具：深度查询 + 反投影 + TF2 变换
 │   ├── prompts.py                    # VLM System Prompt 模板（阶段一/二）
-│   ├── grab_action.py               # 抓取全流程状态机：SETUP→预抓取→接近→夹取→抬起→搬运→放置
-│   └── planning_scene_manager.py     # Planning Scene 封装：物体/碰撞/附着管理
+│   ├── grab_action.py               # 抓取10阶段状态机：SETUP→观察→预抓取→接近→夹取→抬起→搬运→放置
+│   ├── planning_scene_manager.py     # Planning Scene 封装：物体/碰撞/附着管理
+│   └── camera_axis_calibrator.py     # 相机轴标定诊断节点（Gazebo 逐姿态轴观察）
 ├── launch/
-│   └── move_demo.launch.py           # 总启动器（含 vlm_bridge + grab_action）
+│   ├── move_demo.launch.py           # 总启动器（含 vlm_bridge + grab_action）
+│   ├── test_no_strawberry.launch.py  # 纯方块测试启动器
+│   └── camera_calibrate.launch.py    # 相机轴标定启动器
 ├── models/
 │   ├── target_box.sdf                # 红色抓取目标: 3cm³ 立方体, 0.05kg
 │   ├── camera.sdf                    # 外部深度相机: Gemini 335, 640x480@30Hz
@@ -352,8 +355,11 @@ colcon build --symlink-install --packages-select lerobot_description position_to
 - [x] 抓取全流程状态机 (grab_action): Planning Scene 集成 + 双层同步 + MoveIt + LinkAttacher
 - [x] Planning Scene 管理器 (planning_scene_manager): 物体/碰撞/附着封装，Phase 2 复用
 - [x] VLM API 封装 (vlm_client): 图像编码 + DashScope 调用 + JSON 解析
-- [x] 相机工具函数 (camera_utils): 深度查询 + 反投影 + TF2 变换
+- [x] 相机工具函数 (camera_utils): 深度查询 + 反投影 + TF2 变换 + LookAt 四元数
 - [x] VLM System Prompt 模板 (prompts): 阶段一全局理解 + 阶段二精确定位
+- [x] 相机轴标定诊断节点 (camera_axis_calibrator): Gazebo 逐姿态轴观察
+- [x] 相机-夹爪坐标系轴映射解析 (2026-06-12): optical X(红,渲染轴) = -gripper Y
+- [x] compute_lookat_quaternion 修复: 基于 URDF RPY 推导, 无 ad-hoc 补偿
 
 ### 待完成（第二阶段：智能排障与多目标）
 - [ ] 障碍物语义辨识（软/硬分类 + 推扫策略）
@@ -362,6 +368,8 @@ colcon build --symlink-install --packages-select lerobot_description position_to
 - [ ] MoveIt 碰撞场景动态管理（按 VLM 语义标签）
 
 ### 已知 Bug
+
+- **AttachLink 脱离后物体翻转**: DetachLink 后 target_box 的 box_link 在 Gazebo 中周期性翻转 180°，疑似脱离瞬间父 link 角速度残留或 joint 未完全清除 (2026-06-12 排查中)
 - **碰撞禁用不完整**: MoveIt SRDF 中未禁用机械臂与草莓场景模型（bed/plant/dirt）之间的碰撞检测
 - **开环控制**: `arm_controller` 和 `gripper_controller` 使用 `open_loop_control: true`，无反馈校正
 - **目标位姿超出工作空间**: VLM 识别的草莓植株位置距离机械臂底座 ~0.45m，超过工作半径 ~0.35m，需将草莓植株挪近或使用更大工作空间的机械臂
