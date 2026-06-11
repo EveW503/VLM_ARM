@@ -35,7 +35,7 @@
         <joint name="ee_camera_optical_joint" type="fixed">
             <parent link="ee_camera_link"/>
             <child link="ee_camera_optical_link"/>
-            <origin xyz="0 0 0" rpy="-1.5707963 0 -1.5707963"/>
+            <origin xyz="0 0 0" rpy="3.1415927 0 -1.5707963"/>
         </joint>
 
         <gazebo reference="ee_camera_link">
