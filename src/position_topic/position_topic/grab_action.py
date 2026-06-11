@@ -11,6 +11,10 @@ Grab Action 节点: 抓取全流程状态机。
 
 订阅 /target_pre_grasp (阶段一粗定位) 和 /target_pose (阶段二精定位).
 """
+import math
+import time
+import traceback
+
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
@@ -112,13 +116,15 @@ class GrabAction(Node):
 
     def _pre_grasp_cb(self, msg):
         """接收 P_rough (粗定位坐标), 存储供 SETUP 注册和降级回退使用。"""
+        if self._state != self.IDLE:
+            return
         self.get_logger().info(
             f"收到粗定位 P_rough: ({msg.pose.position.x:.3f}, "
             f"{msg.pose.position.y:.3f}, {msg.pose.position.z:.3f})"
         )
         self._pre_grasp_target = msg
-        # 如果观察位姿已到达且状态机仍在 IDLE, 触发 SETUP
-        if self._state == self.IDLE and self._observation_pose is not None:
+        # 如果观察位姿已到达, 触发 SETUP
+        if self._observation_pose is not None:
             self._grasp_target = None
             self._target_object_registered = False
             self._transition(self.SETUP)
@@ -192,7 +198,6 @@ class GrabAction(Node):
             self._do_setup_impl()
         except Exception as exc:
             self.get_logger().error(f"SETUP 异常: {exc}")
-            import traceback
             self.get_logger().error(traceback.format_exc())
             self._transition(self.FAILED)
 
@@ -247,7 +252,7 @@ class GrabAction(Node):
     def _on_observe_done(self):
         """到达观察点后, 触发阶段二 VLM 近景精定位。"""
         self.get_logger().info("已到达观察位姿, 触发阶段二精定位...")
-        self._publish_status("ready_for_stage2")
+        self._publish_status("stage1_done")
         self._state = self.AWAIT_STAGE2
         self._stage2_timer = self.create_timer(
             self.get_parameter("stage2_timeout").value,
@@ -296,7 +301,6 @@ class GrabAction(Node):
             z=self._grasp_target.pose.position.z + z_offset,
         )
         # 末端垂直向下: 绕 Y 轴旋转 -90°
-        import math
         half_pi_2 = math.sin(-math.pi / 4.0)
         half_pi_2_cos = math.cos(-math.pi / 4.0)
         pre_grasp_pose.orientation = Quaternion(
@@ -325,10 +329,11 @@ class GrabAction(Node):
         approach_mode = self.get_parameter("approach_mode").value
         self.get_logger().info(f"APPROACH: 碰撞策略 ({approach_mode})...")
 
-        # 从 planning scene 移除目标，让 MoveIt 不再避让
-        self._psm.remove_object("target")
-        self._target_object_registered = False
-        self.get_logger().info("目标已从 Planning Scene 移除")
+        # 从 planning scene 移除目标 (PRE_GRASP 可能已移除, 加 guard)
+        if self._target_object_registered:
+            self._psm.remove_object("target")
+            self._target_object_registered = False
+            self.get_logger().info("目标已从 Planning Scene 移除")
 
         self._plan_approach()
 
@@ -354,7 +359,6 @@ class GrabAction(Node):
         req.avoid_collisions = True
 
         future = self._cartesian_cli.call_async(req)
-        import time
         deadline = time.time() + 3.0
         while time.time() < deadline:
             if future.done():
@@ -413,6 +417,7 @@ class GrabAction(Node):
         else:
             self.get_logger().warning(f"Cartesian 执行失败: {wrapped.result.error_string}")
             self._transition(self.FAILED)
+
     def _on_approach_done(self):
         self.get_logger().info("到达抓取位姿")
         self._transition(self.GRASP)
