@@ -13,7 +13,12 @@ from std_msgs.msg import String
 from geometry_msgs.msg import PoseStamped, Point
 import tf2_ros
 
-from .camera_utils import get_min_depth_in_region, pixel_to_camera_3d, transform_point
+from .camera_utils import (
+    get_min_depth_in_region,
+    pixel_to_camera_3d,
+    transform_point,
+    compute_lookat_quaternion,
+)
 from .prompts import (
     STAGE1_SYSTEM_PROMPT,
     STAGE2_SYSTEM_PROMPT,
@@ -91,13 +96,18 @@ class VlmBridge(Node):
         self._target_pub = self.create_publisher(
             PoseStamped, "/target_pose", 10
         )
+        # --- 观察位姿发布 (新增) ---
+        self._observation_pub = self.create_publisher(
+            PoseStamped, "/target_observation_pose", 10
+        )
 
         # --- 状态机 ---
         self._lock = threading.Lock()
         self._state = self.STAGE_IDLE
         self._vlm_in_progress = False
         # 从 worker 线程到主线程的待发布消息队列
-        self._pending_publish = None  # (topic_type, Point) or None
+        self._pending_publish = None  # (topic_type, Point, quat_tuple) or None
+        self._pending_rough = None    # (topic_type, Point) or None — P_rough 单独发布
         self._state_timer = self.create_timer(0.1, self._state_machine_tick)
 
         self.get_logger().info("VLM Bridge 节点已启动")
@@ -153,8 +163,26 @@ class VlmBridge(Node):
     def _state_machine_tick(self):
         # 处理从 worker 线程来的待发布消息 (主线程安全)
         if self._pending_publish is not None:
-            topic_type, point = self._pending_publish
+            topic_type, point, quat = self._pending_publish
             self._pending_publish = None
+            msg = PoseStamped()
+            msg.header.frame_id = "base"
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.pose.position = point
+            msg.pose.orientation.x = quat[0]
+            msg.pose.orientation.y = quat[1]
+            msg.pose.orientation.z = quat[2]
+            msg.pose.orientation.w = quat[3]
+            if topic_type == "observation":
+                self._observation_pub.publish(msg)
+                self.get_logger().info("已发布 /target_observation_pose")
+            elif topic_type == "target":
+                self._target_pub.publish(msg)
+                self.get_logger().info("已发布 /target_pose")
+
+        if self._pending_rough is not None:
+            topic_type, point = self._pending_rough
+            self._pending_rough = None
             msg = PoseStamped()
             msg.header.frame_id = "base"
             msg.header.stamp = self.get_clock().now().to_msg()
@@ -162,10 +190,7 @@ class VlmBridge(Node):
             msg.pose.orientation.w = 1.0
             if topic_type == "pre_grasp":
                 self._pre_grasp_pub.publish(msg)
-                self.get_logger().info("已发布 /target_pre_grasp")
-            elif topic_type == "target":
-                self._target_pub.publish(msg)
-                self.get_logger().info("已发布 /target_pose")
+                self.get_logger().info("已发布 /target_pre_grasp (P_rough)")
 
         with self._lock:
             if self._vlm_in_progress:
@@ -222,6 +247,8 @@ class VlmBridge(Node):
             bbox = target.get("bbox", [-1, -1, -1, -1])
             confidence = target.get("confidence", 0.0)
             label = target.get("label", "unknown")
+            direction = target.get("optimal_approach_direction", "top")
+            self.get_logger().info(f"VLM 建议观察方向: {direction}")
 
             if bbox[0] < 0:
                 self.get_logger().warning("VLM 未发现可采摘目标")
@@ -266,12 +293,53 @@ class VlmBridge(Node):
                     self._vlm_in_progress = False
                 return
 
+            p_rough = pt  # (x, y, z) in base frame
+
             self.get_logger().info(
-                f"阶段一 3D (base): ({pt[0]:.4f}, {pt[1]:.4f}, {pt[2]:.4f})"
+                f"阶段一 3D rough (base): ({p_rough[0]:.4f}, {p_rough[1]:.4f}, {p_rough[2]:.4f})"
+            )
+
+            # 方位偏移映射 (base 坐标系, 单位: 米)
+            DIRECTION_OFFSETS = {
+                "front":       (-0.15,  0.00,  0.15),
+                "left":        ( 0.00,  0.15,  0.15),
+                "right":       ( 0.00, -0.15,  0.15),
+                "front_left":  (-0.15,  0.15,  0.15),
+                "front_right": (-0.15, -0.15,  0.15),
+                "top":         ( 0.00,  0.00,  0.20),
+            }
+            offset = DIRECTION_OFFSETS.get(direction, DIRECTION_OFFSETS["top"])
+
+            # 计算观察点坐标 P_obs = P_rough + offset
+            p_obs = (
+                p_rough[0] + offset[0],
+                p_rough[1] + offset[1],
+                p_rough[2] + offset[2],
+            )
+
+            # 计算 LookAt 四元数 (从 P_obs 看向 P_rough)
+            q = compute_lookat_quaternion(p_obs, p_rough)
+            if q is None:
+                self.get_logger().error("LookAt 四元数计算失败, 降级为 identity")
+                q = (0.0, 0.0, 0.0, 1.0)
+
+            self.get_logger().info(
+                f"观察位姿 (base): pos=({p_obs[0]:.4f}, {p_obs[1]:.4f}, {p_obs[2]:.4f}) "
+                f"ori=({q[0]:.3f}, {q[1]:.3f}, {q[2]:.3f}, {q[3]:.3f})"
             )
 
             if not self._dry_run:
-                self._pending_publish = ("pre_grasp", Point(x=pt[0], y=pt[1], z=pt[2]))
+                # 发布观察位姿
+                self._pending_publish = (
+                    "observation",
+                    Point(x=p_obs[0], y=p_obs[1], z=p_obs[2]),
+                    q,
+                )
+                # 同时发布 P_rough 供 grab_action 注册碰撞物体和降级回退
+                self._pending_rough = (
+                    "pre_grasp",
+                    Point(x=p_rough[0], y=p_rough[1], z=p_rough[2]),
+                )
 
             with self._lock:
                 self._state = self.STAGE1_WAIT
@@ -353,7 +421,11 @@ class VlmBridge(Node):
             )
 
             if not self._dry_run:
-                self._pending_publish = ("target", Point(x=pt[0], y=pt[1], z=pt[2]))
+                self._pending_publish = (
+                    "target",
+                    Point(x=pt[0], y=pt[1], z=pt[2]),
+                    (0.0, 0.0, 0.0, 1.0),
+                )
 
             with self._lock:
                 self._state = self.STAGE_IDLE
