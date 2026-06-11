@@ -161,38 +161,38 @@ class VlmBridge(Node):
     # ── 状态机 ─────────────────────────────────────────
 
     def _state_machine_tick(self):
-        # 处理从 worker 线程来的待发布消息 (主线程安全)
-        if self._pending_publish is not None:
-            topic_type, point, quat = self._pending_publish
-            self._pending_publish = None
-            msg = PoseStamped()
-            msg.header.frame_id = "base"
-            msg.header.stamp = self.get_clock().now().to_msg()
-            msg.pose.position = point
-            msg.pose.orientation.x = quat[0]
-            msg.pose.orientation.y = quat[1]
-            msg.pose.orientation.z = quat[2]
-            msg.pose.orientation.w = quat[3]
-            if topic_type == "observation":
-                self._observation_pub.publish(msg)
-                self.get_logger().info("已发布 /target_observation_pose")
-            elif topic_type == "target":
-                self._target_pub.publish(msg)
-                self.get_logger().info("已发布 /target_pose")
-
-        if self._pending_rough is not None:
-            topic_type, point = self._pending_rough
-            self._pending_rough = None
-            msg = PoseStamped()
-            msg.header.frame_id = "base"
-            msg.header.stamp = self.get_clock().now().to_msg()
-            msg.pose.position = point
-            msg.pose.orientation.w = 1.0
-            if topic_type == "pre_grasp":
-                self._pre_grasp_pub.publish(msg)
-                self.get_logger().info("已发布 /target_pre_grasp (P_rough)")
-
         with self._lock:
+            # 处理从 worker 线程来的待发布消息 (线程安全)
+            if self._pending_publish is not None:
+                topic_type, point, quat = self._pending_publish
+                self._pending_publish = None
+                msg = PoseStamped()
+                msg.header.frame_id = "base"
+                msg.header.stamp = self.get_clock().now().to_msg()
+                msg.pose.position = point
+                msg.pose.orientation.x = quat[0]
+                msg.pose.orientation.y = quat[1]
+                msg.pose.orientation.z = quat[2]
+                msg.pose.orientation.w = quat[3]
+                if topic_type == "observation":
+                    self._observation_pub.publish(msg)
+                    self.get_logger().info("已发布 /target_observation_pose")
+                elif topic_type == "target":
+                    self._target_pub.publish(msg)
+                    self.get_logger().info("已发布 /target_pose")
+
+            if self._pending_rough is not None:
+                topic_type, point = self._pending_rough
+                self._pending_rough = None
+                msg = PoseStamped()
+                msg.header.frame_id = "base"
+                msg.header.stamp = self.get_clock().now().to_msg()
+                msg.pose.position = point
+                msg.pose.orientation.w = 1.0
+                if topic_type == "pre_grasp":
+                    self._pre_grasp_pub.publish(msg)
+                    self.get_logger().info("已发布 /target_pre_grasp (P_rough)")
+
             if self._vlm_in_progress:
                 return
 
@@ -328,20 +328,19 @@ class VlmBridge(Node):
                 f"ori=({q[0]:.3f}, {q[1]:.3f}, {q[2]:.3f}, {q[3]:.3f})"
             )
 
-            if not self._dry_run:
-                # 发布观察位姿
-                self._pending_publish = (
-                    "observation",
-                    Point(x=p_obs[0], y=p_obs[1], z=p_obs[2]),
-                    q,
-                )
-                # 同时发布 P_rough 供 grab_action 注册碰撞物体和降级回退
-                self._pending_rough = (
-                    "pre_grasp",
-                    Point(x=p_rough[0], y=p_rough[1], z=p_rough[2]),
-                )
-
             with self._lock:
+                if not self._dry_run:
+                    # 发布观察位姿
+                    self._pending_publish = (
+                        "observation",
+                        Point(x=p_obs[0], y=p_obs[1], z=p_obs[2]),
+                        q,
+                    )
+                    # 同时发布 P_rough 供 grab_action 注册碰撞物体和降级回退
+                    self._pending_rough = (
+                        "pre_grasp",
+                        Point(x=p_rough[0], y=p_rough[1], z=p_rough[2]),
+                    )
                 self._state = self.STAGE1_WAIT
                 self._vlm_in_progress = False
 
@@ -420,14 +419,14 @@ class VlmBridge(Node):
                 f"阶段二 3D (base): ({pt[0]:.4f}, {pt[1]:.4f}, {pt[2]:.4f})"
             )
 
-            if not self._dry_run:
-                self._pending_publish = (
-                    "target",
-                    Point(x=pt[0], y=pt[1], z=pt[2]),
-                    (0.0, 0.0, 0.0, 1.0),
-                )
-
             with self._lock:
+                if not self._dry_run:
+                    self._pending_publish = (
+                        "target",
+                        Point(x=pt[0], y=pt[1], z=pt[2]),
+                        (0.0, 0.0, 0.0, 1.0),
+                    )
+                self._pending_rough = None  # 清除阶段一的粗定位，防止残留
                 self._state = self.STAGE_IDLE
                 self._vlm_in_progress = False
 
