@@ -163,15 +163,19 @@ def transform_point(tf_buffer, x, y, z, source_frame, target_frame, timeout_sec=
         return None
 
 
+# ee_camera mount pitch: origin_rpy="0 0.5 0" → ee_cam_X 相对 gripper_X 下倾 0.5 rad
+_CAMERA_PITCH = 0.5
+
+
 def compute_lookat_quaternion(p_obs, p_target):
     """
     计算从观察点 p_obs 指向目标点 p_target 的四元数。
 
-    生成的姿态使 -gripper Y 轴 (ee_camera optical Z = 光轴) 对准目标，
-    gripper 保持大致水平。
+    生成的姿态补偿相机下倾角，使 ee_camera optical Z 对准目标。
 
-    SO101 光轴链路:
-      ee_camera_optical Z = -ee_camera_link Y = -gripper Y
+    SO101 光轴链路 (标准 ROS 光学):
+      optical Z = ee_cam_X = gripper_X 下倾 _CAMERA_PITCH rad.
+      补偿: 将 gripper_X 反向抬升 _CAMERA_PITCH rad.
 
     Args:
         p_obs: (3,) array-like, 观察点坐标 [x, y, z] (米)
@@ -189,20 +193,22 @@ def compute_lookat_quaternion(p_obs, p_target):
     norm = np.linalg.norm(direction)
     if norm < 1e-9:
         return None
-    # optical Z = -gripper Y = 光轴方向; 让 -gripper Y = direction
-    y_axis = -direction / norm
+    x_axis = direction / norm  # 目标方向 (光轴应对准此方向)
 
-    # 保持大致水平
     world_up = np.array([0.0, 0.0, 1.0])
-    if abs(np.dot(y_axis, world_up)) > 0.999:
-        world_up = np.array([1.0, 0.0, 0.0])
+    if abs(np.dot(x_axis, world_up)) > 0.999:
+        world_up = np.array([0.0, 1.0, 0.0])
 
-    x_axis = np.cross(y_axis, world_up)
-    x_axis = x_axis / np.linalg.norm(x_axis)
+    y_axis = np.cross(world_up, x_axis)
+    y_axis = y_axis / np.linalg.norm(y_axis)
 
     z_axis = np.cross(x_axis, y_axis)
 
     R = np.column_stack([x_axis, y_axis, z_axis])
     r = Rotation.from_matrix(R)
+
+    # 补偿相机下倾: URDF Ry(+0.5) 使光轴下倾, Ry(-0.5) 反向抬起
+    r = r * Rotation.from_euler('y', -_CAMERA_PITCH)
+
     q = r.as_quat()
     return (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
