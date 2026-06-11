@@ -166,15 +166,15 @@ def transform_point(tf_buffer, x, y, z, source_frame, target_frame, timeout_sec=
 def compute_lookat_quaternion(p_obs, p_target):
     """
     计算从观察点 p_obs 指向目标点 p_target 的四元数。
-    使 ee_camera 光学帧的蓝色 Z 轴 (光轴/深度) 对准目标方向。
+    使 ee_camera 光学帧的红色 X 轴 (Gazebo 渲染/成像轴) 对准目标方向。
 
     轴映射 (从 URDF optical frame RPY = π,0,-π/2 解析):
-        optical X (红) = -gripper Y
-        optical Y (绿) = -gripper X
-        optical Z (蓝) = -gripper Z
+        optical X (红) = -gripper Y   ← Gazebo 渲染轴, 对准目标
+        optical Y (绿) = -gripper X   ← 图像 down 方向
+        optical Z (蓝) = -gripper Z   ← 光轴/深度
 
-    为让光轴对准目标: optical Z = direction → gripper Z = -direction.
-    gripper Y 约束在水平面, 保证图像不倾斜.
+    推导: optical_X_world = direction → gripper Y = -direction.
+    图像不倾斜: optical Y (image down) ≈ world -Z.
 
     Args:
         p_obs: (3,) array-like, 观察点坐标 [x, y, z] (米, base frame)
@@ -193,22 +193,29 @@ def compute_lookat_quaternion(p_obs, p_target):
     if norm < 1e-9:
         return None
 
-    # optical Z (光轴) = -gripper Z → gripper Z = -optical Z = -direction
-    gripper_z = -direction / norm
+    # 1. 构建 optical frame 在世界中的朝向
+    # optical X (红) = Gazebo 渲染轴, 对准目标
+    optical_x = direction / norm
 
-    # gripper Y 约束在水平面: optical X = -gripper Y 为水平, 图像不倾斜
-    world_up = np.array([0.0, 0.0, 1.0])
-    if abs(np.dot(gripper_z, world_up)) > 0.999:
-        # 目标在正上方/正下方, 用备选 up 向量避免退化
-        world_up = np.array([1.0, 0.0, 0.0])
+    # optical Y (绿, image down) 尽量指向世界 -Z (正立图像)
+    world_down = np.array([0.0, 0.0, -1.0])
+    if abs(np.dot(optical_x, world_down)) > 0.999:
+        # 相机正对下方/上方, 退化为 world -Y 防止图像倾斜
+        world_down = np.array([0.0, -1.0, 0.0])
 
-    gripper_y = np.cross(world_up, gripper_z)
-    gripper_y = gripper_y / np.linalg.norm(gripper_y)
+    # 投影到垂直于 optical_x 的平面
+    optical_y = world_down - np.dot(world_down, optical_x) * optical_x
+    optical_y = optical_y / np.linalg.norm(optical_y)
 
-    # gripper X = gripper Y × gripper Z (右手定则)
-    gripper_x = np.cross(gripper_y, gripper_z)
+    # optical Z (蓝) = optical X × optical Y (右手定则)
+    optical_z = np.cross(optical_x, optical_y)
 
-    # 旋转矩阵: 列分别为 gripper X, Y, Z 在 base frame 中的方向
+    # 2. 从 optical frame 推导 gripper frame (基于 R_optical 映射):
+    #    gripper X = -optical Y, gripper Y = -optical X, gripper Z = -optical Z
+    gripper_x = -optical_y
+    gripper_y = -optical_x
+    gripper_z = -optical_z
+
     R_gripper = np.column_stack([gripper_x, gripper_y, gripper_z])
     r = Rotation.from_matrix(R_gripper)
     q = r.as_quat()

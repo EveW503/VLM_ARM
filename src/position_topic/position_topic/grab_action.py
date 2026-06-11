@@ -346,9 +346,9 @@ class GrabAction(Node):
             z=self._grasp_target.pose.position.z + z_offset,
         )
         # 末端接近方向 (gripper X) 指向下方 → Ry(-90°)
-        # 轴映射 (URDF optical RPY π,0,-π/2 → optical Z = -gripper Z):
-        #   gripper X → world -Z (approach direction, 接近方向向下)
-        #   gripper Z → world +X (optical Z = -gripper Z = world -X, 相机朝后)
+        # 轴映射 (optical X(红,渲染轴) = -gripper Y):
+        #   gripper X → world -Z (接近方向向下)
+        #   gripper Y → world +Y → optical X(红,渲染轴) = world -Y (相机朝左)
         sqrt2_2 = math.sqrt(2) / 2.0
         pre_grasp_pose.orientation = Quaternion(
             x=0.0, y=-sqrt2_2, z=0.0, w=sqrt2_2,
