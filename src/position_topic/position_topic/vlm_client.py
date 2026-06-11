@@ -44,7 +44,7 @@ class VlmClient:
         b64_str = base64.b64encode(buffer).decode("utf-8")
         return f"data:image/jpeg;base64,{b64_str}"
 
-    def call_vlm(self, system_prompt, user_instruction, image_data_url, max_tokens=300):
+    def call_vlm(self, system_prompt, user_instruction, image_data_url, max_tokens=500):
         """
         调用 VLM 进行多模态推理。
 

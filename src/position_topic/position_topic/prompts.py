@@ -75,6 +75,6 @@ STAGE2_SYSTEM_PROMPT = """\
 - 如果没有发现清晰的目标物体, bbox 设为 [-1, -1, -1, -1]
 """
 
-DEFAULT_STAGE1_USER_INSTRUCTION = "请分析这张图像, 找出最适合抓取的目标物体并返回其边界框。"
+DEFAULT_STAGE1_USER_INSTRUCTION = "请分析这张图像, 找出所有可采摘的草莓果实和障碍物, 返回完整的目标列表。"
 
 DEFAULT_STAGE2_USER_INSTRUCTION = "请分析这张近距离图像, 定位目标物体抓取点的精确位置并返回其边界框。"
