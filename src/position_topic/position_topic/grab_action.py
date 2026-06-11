@@ -345,11 +345,12 @@ class GrabAction(Node):
             y=self._grasp_target.pose.position.y,
             z=self._grasp_target.pose.position.z + z_offset,
         )
-        # 末端垂直向下: 绕 Y 轴旋转 -90°
-        half_pi_2 = math.sin(-math.pi / 4.0)
-        half_pi_2_cos = math.cos(-math.pi / 4.0)
+        # 指尖向下: -gripper Y (指尖方向) → world -Z
+        # Rx(90°) → Y→Z, 所以 -Y→-Z (指尖指向下方)
+        sin45 = math.sin(math.pi / 4.0)
+        cos45 = math.cos(math.pi / 4.0)
         pre_grasp_pose.orientation = Quaternion(
-            x=0.0, y=half_pi_2, z=0.0, w=half_pi_2_cos,
+            x=sin45, y=0.0, z=0.0, w=cos45,
         )
 
         self._send_move_request(
