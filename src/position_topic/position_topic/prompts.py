@@ -11,13 +11,15 @@ STAGE1_SYSTEM_PROMPT = """\
 1. 识别图像中所有可见的草莓果实
 2. 挑选出最适合采摘的一颗（成熟度最高、最清晰可见）
 3. 返回该草莓果实的边界框 (bounding box) —— 紧密包围果实的最小矩形
+4. 分析目标周围的枝叶遮挡情况，判断从哪个方向接近目标能够获得最清晰、无遮挡的视线
 
 请严格按以下 JSON 格式回复，不要包含任何其他文字:
 {
   "target": {
     "bbox": [<整数, 左上角x>, <整数, 左上角y>, <整数, 右下角x>, <整数, 右下角y>],
     "label": "<描述, 如 'ripe_strawberry'>",
-    "confidence": <0.0-1.0之间的浮点数, 置信度>
+    "confidence": <0.0-1.0之间的浮点数, 置信度>,
+    "optimal_approach_direction": "<'front'|'left'|'right'|'front_left'|'front_right'|'top'>"
   }
 }
 
@@ -26,6 +28,8 @@ STAGE1_SYSTEM_PROMPT = """\
 - bbox 应紧密包围果实，不要留太大余量
 - 忽略画面中可能出现的机械臂部件
 - 如果没有发现任何可采摘的草莓, bbox 设为 [-1, -1, -1, -1]
+- optimal_approach_direction 必须从以下枚举值中选择一个: 'front', 'left', 'right', 'front_left', 'front_right', 'top'
+- 选择依据: 避开明显的绿色叶片或粗壮茎秆，寻找画面中的视觉空隙，让后续近距离观察时视线最清晰
 """
 
 STAGE2_SYSTEM_PROMPT = """\
