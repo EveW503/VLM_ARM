@@ -355,8 +355,9 @@ class GrabAction(Node):
         req.group_name = "arm"
         req.link_name = "gripper"
         req.waypoints = [self._grasp_target.pose]
-        req.max_step = 0.005
-        req.avoid_collisions = True
+        req.max_step = 0.01       # 航点间距 1cm
+        req.jump_threshold = 0.0  # 禁用跳跃阈值, 确保连续轨迹
+        req.avoid_collisions = False  # 直线下探不检查碰撞 (目标已从 scene 移除)
 
         future = self._cartesian_cli.call_async(req)
         deadline = time.time() + 3.0
@@ -373,9 +374,17 @@ class GrabAction(Node):
         resp = future.result()
         if resp is None or resp.error_code.val != 1:
             frac = resp.fraction if resp else 0.0
-            self.get_logger().error(f"Cartesian 路径规划失败, fraction={frac:.2f}")
-            self._transition(self.FAILED)
-            return
+            self.get_logger().error(
+                f"Cartesian 路径规划失败, fraction={frac:.2f}, "
+                f"error_code={resp.error_code.val if resp else 'N/A'}"
+            )
+            if frac < 0.9:
+                self._transition(self.FAILED)
+                return
+            # fraction >= 0.9 但 error_code != SUCCESS: 尝试执行部分轨迹
+            self.get_logger().warning(
+                f"Cartesian 路径不完整 (fraction={frac:.2f}), 尝试执行可达部分"
+            )
 
         self.get_logger().info(f"Cartesian 路径规划成功, fraction={resp.fraction:.2f}")
         self._execute_cartesian_trajectory(resp.solution.joint_trajectory)
