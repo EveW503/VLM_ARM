@@ -207,8 +207,8 @@ def compute_lookat_quaternion(p_obs, p_target):
     R = np.column_stack([x_axis, y_axis, z_axis])
     r = Rotation.from_matrix(R)
 
-    # 补偿相机 pitch: URDF Ry(+0.5) 使光轴下倾, Ry(-0.5) 反向
-    r = r * Rotation.from_euler('y', -_CAMERA_PITCH)
+    # 补偿相机 pitch: URDF Ry(+0.5) 使光轴下倾, Ry(+0.5) 反向抬起
+    r = r * Rotation.from_euler('y', _CAMERA_PITCH)
 
     q = r.as_quat()
     return (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
