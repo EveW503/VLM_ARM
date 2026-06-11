@@ -166,14 +166,22 @@ def transform_point(tf_buffer, x, y, z, source_frame, target_frame, timeout_sec=
 def compute_lookat_quaternion(p_obs, p_target):
     """
     计算从观察点 p_obs 指向目标点 p_target 的四元数。
-    -gripper Y 轴 (= ee_camera optical Z) 对准目标方向。
+    使 ee_camera 光学帧的蓝色 Z 轴 (光轴/深度) 对准目标方向。
+
+    轴映射 (从 URDF optical frame RPY = π,0,-π/2 解析):
+        optical X (红) = -gripper Y
+        optical Y (绿) = -gripper X
+        optical Z (蓝) = -gripper Z
+
+    为让光轴对准目标: optical Z = direction → gripper Z = -direction.
+    gripper Y 约束在水平面, 保证图像不倾斜.
 
     Args:
-        p_obs: (3,) array-like, 观察点坐标 [x, y, z] (米)
-        p_target: (3,) array-like, 目标点坐标 [x, y, z] (米)
+        p_obs: (3,) array-like, 观察点坐标 [x, y, z] (米, base frame)
+        p_target: (3,) array-like, 目标点坐标 [x, y, z] (米, base frame)
 
     Returns:
-        tuple: (qx, qy, qz, qw) 四元数, 或 None
+        tuple: (qx, qy, qz, qw) 四元数 (gripper 在 base 中的朝向), 或 None
     """
     from scipy.spatial.transform import Rotation
 
@@ -184,21 +192,24 @@ def compute_lookat_quaternion(p_obs, p_target):
     norm = np.linalg.norm(direction)
     if norm < 1e-9:
         return None
-    y_axis = -direction / norm  # optical Z = -gripper Y = 目标方向
 
+    # optical Z (光轴) = -gripper Z → gripper Z = -optical Z = -direction
+    gripper_z = -direction / norm
+
+    # gripper Y 约束在水平面: optical X = -gripper Y 为水平, 图像不倾斜
     world_up = np.array([0.0, 0.0, 1.0])
-    if abs(np.dot(y_axis, world_up)) > 0.999:
+    if abs(np.dot(gripper_z, world_up)) > 0.999:
+        # 目标在正上方/正下方, 用备选 up 向量避免退化
         world_up = np.array([1.0, 0.0, 0.0])
 
-    x_axis = np.cross(y_axis, world_up)
-    x_axis = x_axis / np.linalg.norm(x_axis)
-    z_axis = np.cross(x_axis, y_axis)
+    gripper_y = np.cross(world_up, gripper_z)
+    gripper_y = gripper_y / np.linalg.norm(gripper_y)
 
-    R = np.column_stack([x_axis, y_axis, z_axis])
-    r = Rotation.from_matrix(R)
-    # 补偿: 光学帧 RPY 使 optical Z = -gripper Y, optical X = -gripper X
-    # LookAt 对齐的是 -gripper Y, 但实际 optical X (红) 对到目标 → 差 90°
-    # Ry(-π/2) 交换 X↔Z, 使蓝轴 (optical Z) 对准目标
-    r = r * Rotation.from_euler('y', -1.5708)
+    # gripper X = gripper Y × gripper Z (右手定则)
+    gripper_x = np.cross(gripper_y, gripper_z)
+
+    # 旋转矩阵: 列分别为 gripper X, Y, Z 在 base frame 中的方向
+    R_gripper = np.column_stack([gripper_x, gripper_y, gripper_z])
+    r = Rotation.from_matrix(R_gripper)
     q = r.as_quat()
     return (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
