@@ -20,7 +20,7 @@ from std_msgs.msg import String
 from moveit_msgs.action import MoveGroup
 from moveit_msgs.msg import (
     BoundingVolume, Constraints, MotionPlanRequest,
-    PlanningOptions, PositionConstraint,
+    OrientationConstraint, PlanningOptions, PositionConstraint,
 )
 from moveit_msgs.srv import GetCartesianPath
 from shape_msgs.msg import SolidPrimitive
@@ -491,9 +491,11 @@ class GrabAction(Node):
     # ── MoveGroup 封装 ────────────────────────────
 
     def _send_move_request(self, target_pose, frame_id, *,
-                           success_callback, fail_callback):
+                           success_callback, fail_callback,
+                           use_orientation=False):
         goal = MoveGroup.Goal()
-        goal.request = self._build_request(target_pose, frame_id)
+        goal.request = self._build_request(target_pose, frame_id,
+                                           use_orientation=use_orientation)
         goal.planning_options = PlanningOptions()
 
         send_future = self._move_action.send_goal_async(goal)
@@ -501,7 +503,7 @@ class GrabAction(Node):
             lambda f: self._move_response_cb(f, success_callback, fail_callback)
         )
 
-    def _build_request(self, pose, frame_id):
+    def _build_request(self, pose, frame_id, *, use_orientation=False):
         req = MotionPlanRequest()
         req.group_name = "arm"
         req.num_planning_attempts = 10
@@ -510,6 +512,8 @@ class GrabAction(Node):
         req.max_acceleration_scaling_factor = self.get_parameter("velocity_scaling").value
 
         constraints = Constraints()
+
+        # 位置约束
         pc = PositionConstraint()
         pc.header.frame_id = frame_id
         pc.link_name = "gripper"
@@ -524,6 +528,19 @@ class GrabAction(Node):
         region.primitive_poses.append(pose)
         pc.constraint_region = region
         constraints.position_constraints.append(pc)
+
+        # 方向约束 (仅当调用方明确要求时)
+        if use_orientation:
+            oc = OrientationConstraint()
+            oc.header.frame_id = frame_id
+            oc.link_name = "gripper"
+            oc.orientation = pose.orientation
+            oc.absolute_x_axis_tolerance = 0.1
+            oc.absolute_y_axis_tolerance = 0.1
+            oc.absolute_z_axis_tolerance = 0.1
+            oc.weight = 1.0
+            constraints.orientation_constraints.append(oc)
+
         req.goal_constraints.append(constraints)
         return req
 
