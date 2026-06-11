@@ -196,5 +196,9 @@ def compute_lookat_quaternion(p_obs, p_target):
 
     R = np.column_stack([x_axis, y_axis, z_axis])
     r = Rotation.from_matrix(R)
+    # 补偿: 光学帧 RPY 使 optical Z = -gripper Y, optical X = -gripper X
+    # LookAt 对齐的是 -gripper Y, 但实际 optical X (红) 对到目标 → 差 90°
+    # Ry(-π/2) 交换 X↔Z, 使蓝轴 (optical Z) 对准目标
+    r = r * Rotation.from_euler('y', -1.5708)
     q = r.as_quat()
     return (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
