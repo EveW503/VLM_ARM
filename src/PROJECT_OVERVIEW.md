@@ -158,12 +158,14 @@ position_topic/
 ├── position_topic/
 │   ├── position_publisher.py         # 目标位置发布节点 (PoseStamped @ 1Hz)
 │   ├── position_subscriber.py        # 目标位姿订阅→MoveIt 规划执行（手动调试用）
-│   ├── vlm_bridge.py                 # VLM 双阶段推理节点：相机→VLM→3D→发布目标
+│   ├── vlm_bridge.py                 # VLM 双阶段推理：多目标识别→排序→循环采摘 + 软硬分类
 │   ├── vlm_client.py                 # VLM API 封装：图像编码 + DashScope 调用 + JSON 解析
-│   ├── camera_utils.py               # 相机工具：深度查询 + 反投影 + TF2 变换
-│   ├── prompts.py                    # VLM System Prompt 模板（阶段一/二）
-│   ├── grab_action.py               # 抓取全流程状态机：SETUP→预抓取→接近→夹取→抬起→搬运→放置
-│   └── planning_scene_manager.py     # Planning Scene 封装：物体/碰撞/附着管理
+│   ├── camera_utils.py               # 相机工具：深度查询 + 反投影 + TF2 变换 + LookAt
+│   ├── prompts.py                    # VLM System Prompt 模板（阶段一多目标/阶段二）
+│   ├── grab_action.py               # 抓取11阶段状态机：SETUP→观察→预抓取→[推扫]→接近→...
+│   ├── planning_scene_manager.py     # Planning Scene 封装：物体/碰撞/附着管理
+│   ├── push_sweep.py                 # 推扫排障轨迹生成：水平推扫软障碍物（叶片）
+│   └── camera_axis_calibrator.py     # 相机轴标定诊断节点（Gazebo 逐姿态轴观察）
 ├── launch/
 │   └── move_demo.launch.py           # 总启动器（含 vlm_bridge + grab_action）
 ├── models/
@@ -202,16 +204,20 @@ position_topic/
 - **参数**: velocity_scaling=0.3, accel_scaling=0.3, planning_attempts=10, planning_time=5.0s
 - **注意**: 保留用于手动调试；正式抓取流程由 grab_action 执行
 
-##### vlm_bridge — VLM 双阶段推理节点
+##### vlm_bridge — VLM 双阶段推理节点（多目标 + 循环采摘）
 - **触发**: 订阅 `/task_command` (String)，收到自然语言指令后触发阶段一
-- **阶段一**: 订阅 Gemini 335 (`/camera/gemini_335/image_raw` + depth + info) → 调用 Qwen3 VL Plus → 归一化坐标[0,1000]转像素 → 反投影 + TF2(`camera_depth_optical_frame→base`) → 发布 `/target_pre_grasp`
-- **阶段二**: 收到 `/grab_status="stage1_done"` 后，订阅 ee_camera (`/so101/camera/end_effector_depth_camera/image_raw` + depth + info) → 同理映射 → 发布 `/target_pose`
-- **VLM API**: DashScope OpenAI 兼容接口，Key 从 `DASHSCOPE_API_KEY` 环境变量读取
+- **阶段一**: 订阅 Gemini 335 → 调用 Qwen3 VL Plus → 解析 `targets[]` + `obstacles[]` 数组 → `rank_targets()` 排序（成熟度>无障碍>置信度）→ 反投影 + TF2 → 发布 `/target_pre_grasp` + `/target_observation_pose` + `/target_metadata`
+- **阶段二**: 收到 `/grab_status="stage1_done"` 后，订阅 ee_camera → 同理映射 → 发布 `/target_pose`
+- **循环**: 收到 `grasp_complete` → 自动重新触发阶段一；连续 2 次无目标 → 发布 `task_complete`
+- **失败处理**: 同目标连续 3 次抓取失败 → 加入黑名单，跳过该目标选下一个
+- **VLM API**: DashScope OpenAI 兼容接口，Key 从 `DASHSCOPE_API_KEY` 环境变量读取，max_tokens=500
 - **dry_run 模式**: `--ros-args -p dry_run:=true` 只推理不发布
 
-##### grab_action — 抓取全流程状态机
-- **触发**: 订阅 `/target_pre_grasp` → 自动开始全流程
-- **状态机**: SETUP → PRE_GRASP → AWAIT_STAGE2 → APPROACH → GRASP → LIFT → TRANSPORT → PLACE → IDLE
+##### grab_action — 抓取全流程状态机（11 阶段 + 推扫排障）
+- **触发**: 订阅 `/target_pre_grasp` + `/target_observation_pose` 协同到达 → 自动开始全流程
+- **状态机**: SETUP → MOVE_TO_OBSERVE → AWAIT_STAGE2 → PRE_GRASP → [PUSH_SWEEP] → APPROACH → GRASP → LIFT → TRANSPORT → PLACE → IDLE
+- **PUSH_SWEEP**: 仅当 `/target_metadata` 中 obstacle_above != "none" 且 material == "soft" 时触发；3 个 Cartesian 航点水平推扫；失败降级为直接 APPROACH
+- **元数据订阅**: 订阅 `/target_metadata` (JSON) 获取 material/obstacle_above/direction 等语义属性
 - **Planning Scene 集成**: SETUP 阶段通过 `PlanningSceneManager` 将目标物体注册到 MoveIt（`add_object`），PRE_GRASP 自动绕行；APPROACH 通过 `allow_collision`/`remove_object` 让 MoveIt 不再避让
 - **双层同步**: GRASP 阶段同时操作 Gazebo (`AttachLink`) 和 MoveIt (`attach_object`)，PLACE 阶段两层一起清理
 - **夹爪时机**: APPROACH 阶段张爪（离目标仅 8cm，不会引入规划失败），SETUP/PRE_GRASP 保持闭合
@@ -354,12 +360,16 @@ colcon build --symlink-install --packages-select lerobot_description position_to
 - [x] VLM API 封装 (vlm_client): 图像编码 + DashScope 调用 + JSON 解析
 - [x] 相机工具函数 (camera_utils): 深度查询 + 反投影 + TF2 变换
 - [x] VLM System Prompt 模板 (prompts): 阶段一全局理解 + 阶段二精确定位
+- [x] 相机-夹爪坐标系轴映射解析: optical X(红,渲染轴) = -gripper Y (2026-06-12)
+- [x] 多目标软硬识别 (2026-06-12): VLM 输出 targets[] + obstacles[], rank_targets() 排序
+- [x] 推扫排障 (push_sweep): 3 航点 Cartesian 水平推扫软障碍物，失败自动降级
+- [x] 循环采摘: grasp_complete → 重新 Stage1，直到无目标发布 task_complete
+- [x] 失败处理: 同目标连续 3 次失败 → 黑名单跳过
 
-### 待完成（第二阶段：智能排障与多目标）
-- [ ] 障碍物语义辨识（软/硬分类 + 推扫策略）
-- [ ] 自然语言驱动的多目标优先级排序
-- [ ] 推扫排障轨迹生成
-- [ ] MoveIt 碰撞场景动态管理（按 VLM 语义标签）
+### 待完成（第三阶段）
+- [ ] 自然语言动态任务指令（"先摘红色的"）
+- [ ] MoveIt 碰撞场景动态管理（按 VLM 语义标签注册障碍物）
+- [ ] 现场实测验证（完整 end-to-end 采摘）
 
 ### 已知 Bug
 - **碰撞禁用不完整**: MoveIt SRDF 中未禁用机械臂与草莓场景模型（bed/plant/dirt）之间的碰撞检测
@@ -371,3 +381,11 @@ colcon build --symlink-install --packages-select lerobot_description position_to
 - 机械臂是 **fixed-base** 机器人（`base_joint` 是 fixed 类型），直接锚定在 world 坐标系上，不依赖物理支撑
 - 调整机械臂位置时 **只能改 `base_joint` 的 xyz 偏移**，不能通过 spawn_entity 的 -x/-y/-z 参数
 - 草莓植株的 `model.rsdf` 是 ERB 模板，如需重新生成不同配置需要 Ruby + rubystats gem
+
+### 多目标采摘约定 (2026-06-12)
+- **VLM 输出格式**: 阶段一返回 `{"targets": [...], "obstacles": [...]}`，每个 target 含 material/ripeness/obstacle_above/direction
+- **排序优先级**: rank_targets() 按 成熟度(ripe>overripe>unripe) > 无障碍(none>leaf>stem) > 置信度 > 索引
+- **软硬分类**: material="soft" 可抓可推扫；material="hard" 必须绕行
+- **推扫触发**: obstacle_above != "none" 且 material == "soft" → PUSH_SWEEP 状态
+- **循环控制**: grasp_complete → 重新 Stage1；连续 2 次空 targets → task_complete；同目标 3 次失败 → 黑名单
+- **降级**: 推扫失败 → 直接 APPROACH（日志 warning）
