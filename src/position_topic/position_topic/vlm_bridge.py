@@ -300,22 +300,30 @@ class VlmBridge(Node):
             )
 
             # 方位偏移映射 (base 坐标系, 单位: 米)
+            # SO101 是小型前伸臂, 偏移量需保守避免进入基座死区
             DIRECTION_OFFSETS = {
-                "front":       (-0.15,  0.00,  0.15),
-                "left":        ( 0.00,  0.15,  0.15),
-                "right":       ( 0.00, -0.15,  0.15),
-                "front_left":  (-0.15,  0.15,  0.15),
-                "front_right": (-0.15, -0.15,  0.15),
-                "top":         ( 0.00,  0.00,  0.20),
+                "front":       (-0.06,  0.00,  0.10),
+                "left":        ( 0.00,  0.08,  0.10),
+                "right":       ( 0.00, -0.08,  0.10),
+                "front_left":  (-0.05,  0.06,  0.10),
+                "front_right": (-0.05, -0.06,  0.10),
+                "top":         ( 0.00,  0.00,  0.15),
             }
             offset = DIRECTION_OFFSETS.get(direction, DIRECTION_OFFSETS["top"])
 
             # 计算观察点坐标 P_obs = P_rough + offset
-            p_obs = (
-                p_rough[0] + offset[0],
-                p_rough[1] + offset[1],
-                p_rough[2] + offset[2],
-            )
+            obs_x = p_rough[0] + offset[0]
+            obs_y = p_rough[1] + offset[1]
+            obs_z = p_rough[2] + offset[2]
+
+            # 机械臂安全工作区保护: SO101 末端缩回 X<0.10 会引发自碰撞/奇异点
+            if obs_x < 0.10:
+                self.get_logger().warn(
+                    f"观察点 X={obs_x:.3f} 进入基座死区, 强制钳制至 X=0.10"
+                )
+                obs_x = 0.10
+
+            p_obs = (obs_x, obs_y, obs_z)
 
             # 计算 LookAt 四元数 (从 P_obs 看向 P_rough)
             q = compute_lookat_quaternion(p_obs, p_rough)

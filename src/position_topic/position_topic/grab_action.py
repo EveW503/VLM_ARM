@@ -235,18 +235,63 @@ class GrabAction(Node):
     # ── 观察位姿移动 ───────────────────────────────
 
     def _do_move_to_observe(self):
-        """MoveIt 规划并移动机械臂到斜上方观察点。"""
+        """MoveIt 规划并移动机械臂到斜上方观察点 (放宽容差, 失败降级)。"""
         self.get_logger().info("MOVE_TO_OBSERVE: 移动到斜上方观察点...")
         obs = self._observation_pose
         if obs is None:
             self._transition(self.FAILED)
             return
 
+        # 观察阶段放宽容差: 方向大致对准即可, 位置 2cm 误差可接受
         self._send_move_request(
             obs.pose, obs.header.frame_id or "base",
             success_callback=self._on_observe_done,
+            fail_callback=self._on_observe_failed,
+            use_orientation=True,
+            pos_tolerance=0.02,
+            ori_tolerance=0.2,
+        )
+
+    def _on_observe_failed(self):
+        """动态观察点规划失败, 降级到绝对安全观察点。"""
+        self.get_logger().warn("动态观察点规划失败, 降级到硬编码安全观察点...")
+
+        rough = self._pre_grasp_target
+        if rough is None:
+            self.get_logger().error("无 P_rough, 无法降级")
+            self._transition(self.FAILED)
+            return
+
+        # 硬编码绝对安全观察点: 基座正前方偏上, X 远离死区
+        safe_x, safe_y, safe_z = 0.20, 0.0, 0.25
+
+        # 计算从安全点看向 P_rough 的四元数
+        from .camera_utils import compute_lookat_quaternion
+        q = compute_lookat_quaternion(
+            (safe_x, safe_y, safe_z),
+            (rough.pose.position.x, rough.pose.position.y, rough.pose.position.z),
+        )
+        if q is None:
+            q = (0.0, 0.0, 0.0, 1.0)
+
+        fallback_pose = Pose(
+            position=Point(x=safe_x, y=safe_y, z=safe_z),
+            orientation=Quaternion(x=q[0], y=q[1], z=q[2], w=q[3]),
+        )
+
+        self.get_logger().info(
+            f"安全观察点: pos=({safe_x:.3f}, {safe_y:.3f}, {safe_z:.3f}), "
+            f"看向 P_rough"
+        )
+
+        # 安全点容差同样放宽
+        self._send_move_request(
+            fallback_pose, "base",
+            success_callback=self._on_observe_done,
             fail_callback=lambda: self._transition(self.FAILED),
             use_orientation=True,
+            pos_tolerance=0.02,
+            ori_tolerance=0.2,
         )
 
     def _on_observe_done(self):
@@ -564,10 +609,15 @@ class GrabAction(Node):
 
     def _send_move_request(self, target_pose, frame_id, *,
                            success_callback, fail_callback,
-                           use_orientation=False):
+                           use_orientation=False,
+                           pos_tolerance=0.01, ori_tolerance=0.1):
         goal = MoveGroup.Goal()
-        goal.request = self._build_request(target_pose, frame_id,
-                                           use_orientation=use_orientation)
+        goal.request = self._build_request(
+            target_pose, frame_id,
+            use_orientation=use_orientation,
+            pos_tolerance=pos_tolerance,
+            ori_tolerance=ori_tolerance,
+        )
         goal.planning_options = PlanningOptions()
 
         send_future = self._move_action.send_goal_async(goal)
@@ -575,7 +625,9 @@ class GrabAction(Node):
             lambda f: self._move_response_cb(f, success_callback, fail_callback)
         )
 
-    def _build_request(self, pose, frame_id, *, use_orientation=False):
+    def _build_request(self, pose, frame_id, *,
+                       use_orientation=False,
+                       pos_tolerance=0.01, ori_tolerance=0.1):
         req = MotionPlanRequest()
         req.group_name = "arm"
         req.num_planning_attempts = 10
@@ -593,7 +645,7 @@ class GrabAction(Node):
 
         sphere = SolidPrimitive()
         sphere.type = SolidPrimitive.SPHERE
-        sphere.dimensions = [0.01]
+        sphere.dimensions = [pos_tolerance]
 
         region = BoundingVolume()
         region.primitives.append(sphere)
@@ -607,9 +659,9 @@ class GrabAction(Node):
             oc.header.frame_id = frame_id
             oc.link_name = "gripper"
             oc.orientation = pose.orientation
-            oc.absolute_x_axis_tolerance = 0.1
-            oc.absolute_y_axis_tolerance = 0.1
-            oc.absolute_z_axis_tolerance = 0.1
+            oc.absolute_x_axis_tolerance = ori_tolerance
+            oc.absolute_y_axis_tolerance = ori_tolerance
+            oc.absolute_z_axis_tolerance = ori_tolerance
             oc.weight = 1.0
             constraints.orientation_constraints.append(oc)
 
