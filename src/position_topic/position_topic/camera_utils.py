@@ -167,11 +167,11 @@ def compute_lookat_quaternion(p_obs, p_target):
     """
     计算从观察点 p_obs 指向目标点 p_target 的四元数。
 
-    生成的姿态使 gripper X 轴 (即 ee_camera 光轴方向) 对准目标，
-    gripper Z 轴保持大致向上。用于机械臂移动到斜上方观察点时计算末端姿态。
+    生成的姿态使 -gripper Y 轴 (ee_camera optical Z = 光轴) 对准目标，
+    gripper 保持大致水平。
 
-    SO101: ee_camera 光轴 = gripper X 轴 (见 so101_camera_in_hand.xacro:
-    ee_camera_optical_joint rpy=-π/2,0,-π/2 → 光学Z=linkX).
+    SO101 光轴链路:
+      ee_camera_optical Z = -ee_camera_link Y = -gripper Y
 
     Args:
         p_obs: (3,) array-like, 观察点坐标 [x, y, z] (米)
@@ -189,21 +189,20 @@ def compute_lookat_quaternion(p_obs, p_target):
     norm = np.linalg.norm(direction)
     if norm < 1e-9:
         return None
-    x_axis = direction / norm  # gripper X = 相机朝向 = 指向目标
+    # optical Z = -gripper Y = 光轴方向; 让 -gripper Y = direction
+    y_axis = -direction / norm
 
-    # 世界 Z 作为"上方向"参考, 使 gripper Z 保持大致向上
+    # 保持大致水平
     world_up = np.array([0.0, 0.0, 1.0])
+    if abs(np.dot(y_axis, world_up)) > 0.999:
+        world_up = np.array([1.0, 0.0, 0.0])
 
-    # 当 x_axis 几乎平行于 world_up 时 (正上/正下方看), 换用备选参考轴
-    if abs(np.dot(x_axis, world_up)) > 0.999:
-        world_up = np.array([0.0, 1.0, 0.0])
-
-    y_axis = np.cross(world_up, x_axis)
-    y_axis = y_axis / np.linalg.norm(y_axis)
+    x_axis = np.cross(y_axis, world_up)
+    x_axis = x_axis / np.linalg.norm(x_axis)
 
     z_axis = np.cross(x_axis, y_axis)
 
     R = np.column_stack([x_axis, y_axis, z_axis])
     r = Rotation.from_matrix(R)
-    q = r.as_quat()  # scipy 返回 [x, y, z, w]
+    q = r.as_quat()
     return (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
