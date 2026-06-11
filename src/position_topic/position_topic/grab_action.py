@@ -47,6 +47,7 @@ class GrabAction(Node):
     LIFT_PLAN = "lift_plan"
     TRANSPORT_PLAN = "transport_plan"
     PLACE = "place"
+    PUSH_SWEEP = "push_sweep"
     FAILED = "failed"
 
     def __init__(self):
@@ -78,6 +79,9 @@ class GrabAction(Node):
         self.create_subscription(
             PoseStamped, "/target_observation_pose", self._observation_pose_cb, 10
         )
+        self.create_subscription(
+            String, "/target_metadata", self._metadata_cb, 10
+        )
 
         # --- 状态反馈 ---
         self._status_pub = self.create_publisher(String, "/grab_status", 10)
@@ -108,6 +112,10 @@ class GrabAction(Node):
         self._observation_pose = None   # P_obs, 观察位姿
         self._grasp_target = None       # P_precise, 阶段二精确定位
         self._stage2_timer = None
+        # --- 目标元数据 (从 /target_metadata 更新) ---
+        self._target_metadata = {}  # dict with material, obstacle_above, etc.
+        self._consecutive_failures = 0  # 当前目标连续失败次数
+        self._sweep_in_progress = False  # 推扫执行中标志
         self._target_object_registered = False
 
         self.get_logger().info("Grab Action 节点已启动 (PSM 集成)")
@@ -157,6 +165,19 @@ class GrabAction(Node):
                 self._stage2_timer = None
             self._transition(self.PRE_GRASP)
 
+    def _metadata_cb(self, msg):
+        """接收当前目标的语义元数据。"""
+        import json
+        try:
+            self._target_metadata = json.loads(msg.data)
+            self.get_logger().info(
+                f"收到元数据: material={self._target_metadata.get('material')}, "
+                f"obstacle={self._target_metadata.get('obstacle_above')}, "
+                f"direction={self._target_metadata.get('optimal_approach_direction')}"
+            )
+        except json.JSONDecodeError:
+            self.get_logger().warning(f"无法解析 /target_metadata: {msg.data}")
+
     # ── 状态机驱动 ────────────────────────────────────
 
     def _transition(self, new_state):
@@ -167,6 +188,8 @@ class GrabAction(Node):
             self._do_move_to_observe()
         elif new_state == self.PRE_GRASP:
             self._plan_pre_grasp()
+        elif new_state == self.PUSH_SWEEP:
+            self._do_push_sweep()
         elif new_state == self.APPROACH:
             self._do_approach()
         elif new_state == self.LIFT_PLAN:
@@ -179,6 +202,7 @@ class GrabAction(Node):
             self._do_place()
         elif new_state == self.FAILED:
             self.get_logger().error("抓取流程失败")
+            self._consecutive_failures += 1
             self._publish_status("error")
             if self._target_object_registered:
                 self._psm.remove_object("target")
@@ -229,6 +253,8 @@ class GrabAction(Node):
             obj_pose, target.header.frame_id or "base"
         )
         self._target_object_registered = True
+        # 重置失败计数(新目标)
+        self._consecutive_failures = 0
         self.get_logger().info(f"目标已注册 (中心 Z={obj_pose.position.z:.3f})")
         self._transition(self.MOVE_TO_OBSERVE)
 
@@ -353,10 +379,106 @@ class GrabAction(Node):
 
         self._send_move_request(
             pre_grasp_pose, self._grasp_target.header.frame_id or "base",
-            success_callback=lambda: self._transition(self.APPROACH),
+            success_callback=self._on_pre_grasp_done,
             fail_callback=lambda: self._transition(self.FAILED),
             use_orientation=True,
         )
+
+    def _on_pre_grasp_done(self):
+        """PRE_GRASP 到达后，根据元数据决定是否推扫。"""
+        from .push_sweep import should_push_sweep
+
+        obstacle = self._target_metadata.get("obstacle_above", "none")
+        material = self._target_metadata.get("material", "soft")
+
+        if should_push_sweep(obstacle, material):
+            self.get_logger().info(
+                f"检测到软障碍物: obstacle={obstacle}, material={material} → 执行推扫"
+            )
+            self._transition(self.PUSH_SWEEP)
+        else:
+            self.get_logger().info(
+                f"无需推扫: obstacle={obstacle}, material={material} → 直接 APPROACH"
+            )
+            self._transition(self.APPROACH)
+
+    # ── 推扫排障
+
+    def _do_push_sweep(self):
+        """执行推扫排障轨迹。"""
+        from .push_sweep import generate_sweep_waypoints
+
+        if self._grasp_target is None:
+            self._transition(self.FAILED)
+            return
+
+        direction = self._target_metadata.get(
+            "optimal_approach_direction", "top"
+        )
+
+        # 构建 pre_grasp 位姿作为推扫参考点
+        z_offset = self.get_parameter("pre_grasp_z_offset").value
+        pre_grasp_pose = Pose()
+        pre_grasp_pose.position = Point(
+            x=self._grasp_target.pose.position.x,
+            y=self._grasp_target.pose.position.y,
+            z=self._grasp_target.pose.position.z + z_offset,
+        )
+
+        waypoints = generate_sweep_waypoints(pre_grasp_pose, direction)
+        if not waypoints:
+            self.get_logger().info("推扫方向无需推扫, 跳过")
+            self._transition(self.APPROACH)
+            return
+
+        self.get_logger().info(
+            f"PUSH_SWEEP: {len(waypoints)} 个航点, direction={direction}"
+        )
+        self._execute_sweep_trajectory(waypoints)
+
+    def _execute_sweep_trajectory(self, waypoints):
+        """通过 Cartesian path 规划并执行推扫轨迹。"""
+        if not self._cartesian_cli.wait_for_service(timeout_sec=3.0):
+            self.get_logger().error("compute_cartesian_path 不可用 (推扫)")
+            self._transition(self.APPROACH)  # 降级
+            return
+
+        req = GetCartesianPath.Request()
+        req.header.stamp = self.get_clock().now().to_msg()
+        req.header.frame_id = "base"
+        req.group_name = "arm"
+        req.link_name = "gripper"
+        req.waypoints = waypoints
+        req.max_step = 0.01
+        req.jump_threshold = 0.0
+        req.avoid_collisions = False
+
+        future = self._cartesian_cli.call_async(req)
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            if future.done():
+                break
+            rclpy.spin_once(self, timeout_sec=0.01)
+
+        if not future.done():
+            self.get_logger().error("compute_cartesian_path 超时 (推扫)")
+            self._transition(self.APPROACH)  # 降级
+            return
+
+        resp = future.result()
+        if resp is None or resp.error_code.val != 1:
+            self.get_logger().warning(
+                f"推扫 Cartesian 规划失败, 降级为直接 APPROACH。 "
+                f"fraction={resp.fraction if resp else 0.0:.2f}"
+            )
+            self._transition(self.APPROACH)  # 降级
+            return
+
+        self.get_logger().info(
+            f"推扫 Cartesian 规划成功, fraction={resp.fraction:.2f}"
+        )
+        self._sweep_in_progress = True
+        self._execute_cartesian_trajectory(resp.solution.joint_trajectory)
 
     # ── 接近 ──────────────────────────────────────
 
@@ -465,11 +587,21 @@ class GrabAction(Node):
             self._transition(self.FAILED)
             return
         if wrapped.result.error_code == 0:
-            self.get_logger().info("Cartesian 接近完成")
-            self._on_approach_done()
+            self.get_logger().info("Cartesian 轨迹完成")
+            if self._sweep_in_progress:
+                self._sweep_in_progress = False
+                self.get_logger().info("推扫完成, 进入 APPROACH")
+                self._transition(self.APPROACH)
+            else:
+                self._on_approach_done()
         else:
             self.get_logger().warning(f"Cartesian 执行失败: {wrapped.result.error_string}")
-            self._transition(self.FAILED)
+            if self._sweep_in_progress:
+                self._sweep_in_progress = False
+                self.get_logger().warning("推扫执行失败, 降级为直接 APPROACH")
+                self._transition(self.APPROACH)
+            else:
+                self._transition(self.FAILED)
 
     def _on_approach_done(self):
         self.get_logger().info("到达抓取位姿")
