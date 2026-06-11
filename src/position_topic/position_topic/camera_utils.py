@@ -166,7 +166,7 @@ def transform_point(tf_buffer, x, y, z, source_frame, target_frame, timeout_sec=
 def compute_lookat_quaternion(p_obs, p_target):
     """
     计算从观察点 p_obs 指向目标点 p_target 的四元数。
-    -gripper Z 轴 (= ee_camera optical Z) 对准目标方向。
+    -gripper Y 轴 (= ee_camera optical Z) 对准目标方向。
 
     Args:
         p_obs: (3,) array-like, 观察点坐标 [x, y, z] (米)
@@ -184,15 +184,15 @@ def compute_lookat_quaternion(p_obs, p_target):
     norm = np.linalg.norm(direction)
     if norm < 1e-9:
         return None
-    z_axis = -direction / norm  # optical Z = -gripper Z = 目标方向
+    y_axis = -direction / norm  # optical Z = -gripper Y = 目标方向
 
     world_up = np.array([0.0, 0.0, 1.0])
-    if abs(np.dot(z_axis, world_up)) > 0.999:
+    if abs(np.dot(y_axis, world_up)) > 0.999:
         world_up = np.array([1.0, 0.0, 0.0])
 
-    x_axis = np.cross(world_up, z_axis)
+    x_axis = np.cross(y_axis, world_up)
     x_axis = x_axis / np.linalg.norm(x_axis)
-    y_axis = np.cross(z_axis, x_axis)
+    z_axis = np.cross(x_axis, y_axis)
 
     R = np.column_stack([x_axis, y_axis, z_axis])
     r = Rotation.from_matrix(R)
