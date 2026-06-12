@@ -10,11 +10,12 @@ lerobot_ws/src/
 ├── lerobot_controller/     # ros2_control 控制器配置
 ├── lerobot_moveit/         # MoveIt 2 运动规划配置 + SRDF
 ├── position_topic/         # 核心抓取逻辑 ← 主要开发包
-│   ├── vlm_bridge.py       # 双阶段 VLM 推理 + 2D→3D 映射 + 目标发布
-│   ├── grab_action.py      # 10 阶段抓取状态机 + MoveIt + LinkAttacher
-│   ├── vlm_client.py       # DashScope OpenAI 兼容 API 调用封装
+│   ├── vlm_bridge.py       # VLM 多目标推理 + rank_targets 排序 + 循环采摘控制
+│   ├── grab_action.py      # 11 阶段抓取状态机 + PUSH_SWEEP 推扫排障 + MoveIt
+│   ├── vlm_client.py       # DashScope OpenAI 兼容 API 调用封装 (max_tokens=500)
 │   ├── camera_utils.py     # 深度查询、像素反投影、TF2 变换、LookAt 四元数
-│   ├── prompts.py          # VLM System Prompt 模板
+│   ├── prompts.py          # VLM System Prompt 模板 (阶段一多目标/阶段二)
+│   ├── push_sweep.py       # 推扫排障轨迹生成 (3 Cartesian 航点)
 │   ├── planning_scene_manager.py  # Planning Scene 物体/碰撞/附着管理
 │   ├── position_subscriber.py     # 调试用 — 手动目标位姿→MoveGroup
 │   └── position_publisher.py      # 调试用 — 手动发布目标位姿
@@ -35,8 +36,8 @@ ros2 launch position_topic move_demo.launch.py
 # 启动仿真 + 控制器 + MoveIt + VLM + 抓取 (无草莓/纯方块)
 ros2 launch position_topic test_no_strawberry.launch.py
 
-# 触发阶段一 VLM 推理
-ros2 topic pub /task_command std_msgs/msg/String "data: '找出最适合抓取的目标物体'"
+# 触发阶段一 VLM 推理 (多目标识别)
+ros2 topic pub --once /task_command std_msgs/msg/String "data: '找出所有可采摘的草莓果实'"
 ```
 
 ## 环境变量
@@ -45,25 +46,27 @@ ros2 topic pub /task_command std_msgs/msg/String "data: '找出最适合抓取�
 |------|------|
 | `DASHSCOPE_API_KEY` | VLM API 密钥 (Qwen3-VL-Plus) |
 
-## 抓取流程状态机 (10 阶段)
+## 抓取流程状态机 (11 阶段)
 
 ```
-IDLE → SETUP → MOVE_TO_OBSERVE → AWAIT_STAGE2 → PRE_GRASP → APPROACH
-  → GRASP → LIFT_PLAN → TRANSPORT_PLAN → PLACE → IDLE
+IDLE → SETUP → MOVE_TO_OBSERVE → AWAIT_STAGE2 → PRE_GRASP
+  → [PUSH_SWEEP]  ← 仅当 obstacle_above != "none" 且 material == "soft"
+  → APPROACH → GRASP → LIFT_PLAN → TRANSPORT_PLAN → PLACE → IDLE (重新等待)
 ```
 
 | 状态 | 行为 |
 |------|------|
 | IDLE | 等待 `/target_observation_pose` + `/target_pre_grasp` 协同到达 |
-| SETUP | 注册目标碰撞物体到 Planning Scene (于 P_rough) |
+| SETUP | 注册目标碰撞物体到 Planning Scene (于 P_rough)，重置失败计数 |
 | MOVE_TO_OBSERVE | MoveIt 移动到斜上方观察位姿 (含方向约束, 放宽位置/姿态容差) |
 | AWAIT_STAGE2 | 等待 VLM 阶段二精确定位 `/target_pose`，超时降级用 P_rough |
 | PRE_GRASP | 移除 scene 目标 → MoveIt 移动到 P_precise 正上方 (Z+0.08m)，末端垂直向下 |
+| PUSH_SWEEP | [可选] Cartesian 推扫软障碍物 (3 航点)，失败降级为直接 APPROACH |
 | APPROACH | 张爪 → Cartesian 直线下探 (max_step=0.01, avoid_collisions=False) |
 | GRASP | 闭合夹爪 → Gazebo AttachLink + MoveIt attach_object 双层附着 |
 | LIFT_PLAN | 抬起至预抓取高度 |
 | TRANSPORT_PLAN | 移动到放置位置 |
-| PLACE | 双层脱离 + 张爪释放 |
+| PLACE | 双层脱离 + 张爪释放 → 发布 "grasp_complete" 触发循环 |
 
 ## Topic 通信
 
@@ -71,8 +74,10 @@ IDLE → SETUP → MOVE_TO_OBSERVE → AWAIT_STAGE2 → PRE_GRASP → APPROACH
 |-------|------|------|
 | `/target_observation_pose` | vlm_bridge→grab_action | 阶段一观察位姿 (含 LookAt 四元数) |
 | `/target_pre_grasp` | vlm_bridge→grab_action | 阶段一 P_rough (粗定位 3D，用于碰撞注册和降级) |
+| `/target_metadata` | vlm_bridge→grab_action | 当前目标语义属性 (JSON: material, obstacle_above, direction, ripeness, label) |
 | `/target_pose` | vlm_bridge→grab_action | 阶段二精确定位位姿 |
-| `/grab_status` | grab_action→vlm_bridge | 状态反馈 ("stage1_done" 触发阶段二) |
+| `/grab_status` | grab_action→vlm_bridge | 状态反馈 ("stage1_done"/"grasp_complete"/"error") |
+| `/task_status` | vlm_bridge→外部 | 任务完成信号 ("task_complete") |
 | `/task_command` | 外部→vlm_bridge | 触发阶段一推理的用户指令 |
 
 ## 关键参数
@@ -96,9 +101,13 @@ IDLE → SETUP → MOVE_TO_OBSERVE → AWAIT_STAGE2 → PRE_GRASP → APPROACH
 
 ## 已知约定
 
-- **VLM**: Qwen3-VL-Plus，bbox 使用归一化坐标 [0,1000]，非像素坐标
+- **VLM**: Qwen3-VL-Plus，bbox 使用归一化坐标 [0,1000]，非像素坐标；max_tokens=500
 - **深度**: Gemini 335 输出 32FC1 (float, m)，ee_camera 输出 16UC1 (uint16, mm)
-- **Prompts**: 已通用化为"目标物体"，兼容方块测试和草莓场景
+- **Prompts**: STAGE1 输出 `targets[]` + `obstacles[]` 数组；STAGE2 输出单目标精确定位
+- **多目标排序**: rank_targets() 按 成熟度(ripe>overripe>unripe) > 无障碍(none>leaf>stem) > 置信度 > 索引
+- **软硬分类**: VLM 标注 material ("soft"/"hard")；soft 可抓可推扫，hard 必须绕行
+- **推扫触发**: obstacle_above != "none" 且 material == "soft" → PUSH_SWEEP 状态
+- **循环控制**: grasp_complete → 重新 Stage1；连续 2 次空 targets → task_complete；同目标 3 次失败 → 黑名单
 - **光学帧 RPY**: `(π, 0, -π/2)` → `optical X=-gripper Y, optical Y=-gripper X, optical Z=-gripper Z`
   - 旋转矩阵: R = Rz(-π/2)·Rx(π) = `[[0,-1,0],[-1,0,0],[0,0,-1]]`
   - `compute_lookat_quaternion`: `gripper Z = -direction`，无 ad-hoc 补偿
@@ -107,8 +116,10 @@ IDLE → SETUP → MOVE_TO_OBSERVE → AWAIT_STAGE2 → PRE_GRASP → APPROACH
 ## 已知未解决问题
 
 - **相机朝向**: ✅ 已解决 (2026-06-12)。关键发现: Gazebo depth camera 渲染轴为 optical X (红)，非 optical Z (蓝)。`compute_lookat_quaternion` 已修正为 optical X 对准目标。
+- **观察位姿 IK**: 动态观察点 (VLM 方向偏移) 和硬编码安全点 [0.20, 0.0, 0.25] 在 SO101 小型臂工作空间内 IK 无解，OMPL 报 "Unable to sample any valid states for goal tree"。需将安全点挪进工作空间或移除方向约束。
 - **相机位置**: X+ 和 Y/Z 轴偏移效果未全部测试完成。
 - **PRE_GRASP 朝向**: `Ry(-90°)` 使 gripper X (approach direction) 指向世界 -Z。待实测验证指尖方向是否与夹爪物理匹配。
+- **AttachLink 脱离后物体翻转**: DetachLink 后 target_box 在 Gazebo 中周期性翻转 180°。
 
 ## 调试常用命令
 
@@ -125,4 +136,13 @@ ros2 topic pub /target_pose geometry_msgs/msg/PoseStamped "{header: {frame_id: '
 
 # 相机轴标定 (诊断工具)
 ros2 launch position_topic camera_calibrate.launch.py
+
+# 查看 VLM 多目标识别结果
+ros2 topic echo /target_metadata --once
+
+# 查看任务完成状态
+ros2 topic echo /task_status
+
+# dry_run 模式测试 VLM (不控制机械臂)
+ros2 run position_topic vlm_bridge --ros-args -p dry_run:=true
 ```
