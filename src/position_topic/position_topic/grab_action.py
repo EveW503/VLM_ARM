@@ -182,27 +182,39 @@ class GrabAction(Node):
 
     def _transition(self, new_state):
         self._state = new_state
-        if new_state == self.SETUP:
-            self._do_setup()
-        elif new_state == self.MOVE_TO_OBSERVE:
-            self._do_move_to_observe()
-        elif new_state == self.PRE_GRASP:
-            self._plan_pre_grasp()
-        elif new_state == self.PUSH_SWEEP:
-            self._do_push_sweep()
-        elif new_state == self.APPROACH:
-            self._do_approach()
-        elif new_state == self.LIFT_PLAN:
-            self._plan_lift()
-        elif new_state == self.TRANSPORT_PLAN:
-            self._plan_transport()
-        elif new_state == self.GRASP:
-            self._do_grasp()
-        elif new_state == self.PLACE:
-            self._do_place()
-        elif new_state == self.FAILED:
-            self.get_logger().error("抓取流程失败")
-            self._consecutive_failures += 1
+        try:
+            if new_state == self.SETUP:
+                self._do_setup()
+            elif new_state == self.MOVE_TO_OBSERVE:
+                self._do_move_to_observe()
+            elif new_state == self.PRE_GRASP:
+                self._plan_pre_grasp()
+            elif new_state == self.PUSH_SWEEP:
+                self._do_push_sweep()
+            elif new_state == self.APPROACH:
+                self._do_approach()
+            elif new_state == self.LIFT_PLAN:
+                self._plan_lift()
+            elif new_state == self.TRANSPORT_PLAN:
+                self._plan_transport()
+            elif new_state == self.GRASP:
+                self._do_grasp()
+            elif new_state == self.PLACE:
+                self._do_place()
+            elif new_state == self.FAILED:
+                self.get_logger().error("抓取流程失败")
+                self._consecutive_failures += 1
+                self._publish_status("error")
+                if self._target_object_registered:
+                    self._psm.remove_object("target")
+                    self._target_object_registered = False
+                if self._stage2_timer is not None:
+                    self.destroy_timer(self._stage2_timer)
+                    self._stage2_timer = None
+                self._state = self.IDLE
+        except Exception as exc:
+            self.get_logger().error(f"{new_state} 异常: {exc}")
+            self.get_logger().error(traceback.format_exc())
             self._publish_status("error")
             if self._target_object_registered:
                 self._psm.remove_object("target")
@@ -210,6 +222,7 @@ class GrabAction(Node):
             if self._stage2_timer is not None:
                 self.destroy_timer(self._stage2_timer)
                 self._stage2_timer = None
+            self._consecutive_failures += 1
             self._state = self.IDLE
 
     def _publish_status(self, status):
@@ -310,14 +323,14 @@ class GrabAction(Node):
             f"看向 P_rough"
         )
 
-        # 安全点容差同样放宽
+        # 安全点只需要位置到达, 不要朝向约束
+        # position_only_ik=True 时 IK 求解器无法同时满足朝向, 加了反而导致规划失败
         self._send_move_request(
             fallback_pose, "base",
             success_callback=self._on_observe_done,
             fail_callback=lambda: self._transition(self.FAILED),
-            use_orientation=True,
+            use_orientation=False,
             pos_tolerance=0.02,
-            ori_tolerance=0.2,
         )
 
     def _on_observe_done(self):

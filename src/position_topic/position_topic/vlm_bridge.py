@@ -204,13 +204,6 @@ class VlmBridge(Node):
             if msg.data == "stage1_done" and self._state == self.STAGE1_WAIT:
                 self.get_logger().info("收到 stage1_done, 触发阶段二推理")
                 self._state = self.STAGE2_QUERY
-            elif msg.data == "error":
-                self.get_logger().warning("收到底层抓取失败(error)状态，重置 VLM 状态机。")
-                self._state = self.STAGE_IDLE
-                self._vlm_in_progress = False
-                self._pending_publish = None
-                self._pending_rough = None
-
             elif msg.data == "grasp_complete":
                 self.get_logger().info("收到 grasp_complete, 重新触发阶段一")
                 self._targets_pool = []
