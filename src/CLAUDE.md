@@ -87,6 +87,7 @@ IDLE → SETUP → MOVE_TO_OBSERVE → AWAIT_STAGE2 → PRE_GRASP
 | `pre_grasp_z_offset` | 0.08 | 预抓取点高于目标的高度 (m) |
 | `jaw_clearance` | 0.03 | APPROACH 目标点 Z 向补偿 (m) |
 | `stage2_timeout` | 3.0 | 阶段二等待超时 (s) |
+| `fallback_observation_points` | [0.20,0.0,0.22, 0.18,0.0,0.20, 0.22,0.05,0.18] | 降级观察点候补 (平铺 list, 每 3 个一组 xyz) |
 | `velocity_scaling` | 0.3 | 全局速度缩放 |
 | `planning_time` | 5.0 | MoveIt 规划时间上限 (s) |
 | `dry_run` (vlm_bridge) | False | 不发布消息，仅测试 VLM 推理 |
@@ -96,7 +97,7 @@ IDLE → SETUP → MOVE_TO_OBSERVE → AWAIT_STAGE2 → PRE_GRASP
 - **方向偏移**: 阶段一 VLM 返回 `optimal_approach_direction`，从 6 个方向选择观察点
 - **X 钳制**: 观察点 X < 0.10m 强制重置 (SO101 基座死区防护)
 - **容差放宽**: 观察阶段 pos_tolerance=0.02, ori_tolerance=0.2 (PRE_GRASP/APPROACH 恢复严苛)
-- **降级**: 观察点规划失败时回退到硬编码安全点 [0.20, 0.0, 0.25]，仍正常触发阶段二
+- **动态观察点失败降级**: 移除朝向约束 (use_orientation=False, 因为 position_only_ik=True 时 KDL 无法同时满足朝向) → 依次尝试 `fallback_observation_points` 候补列表 (每 3 个一组 xyz) → 全部失败则转 FAILED
 - **笛卡尔直线**: APPROACH 必须用 compute_cartesian_path，禁止关节空间插值
 
 ## 已知约定
@@ -116,10 +117,12 @@ IDLE → SETUP → MOVE_TO_OBSERVE → AWAIT_STAGE2 → PRE_GRASP
 ## 已知未解决问题
 
 - **相机朝向**: ✅ 已解决 (2026-06-12)。关键发现: Gazebo depth camera 渲染轴为 optical X (红)，非 optical Z (蓝)。`compute_lookat_quaternion` 已修正为 optical X 对准目标。
-- **观察位姿 IK**: 动态观察点 (VLM 方向偏移) 和硬编码安全点 [0.20, 0.0, 0.25] 在 SO101 小型臂工作空间内 IK 无解，OMPL 报 "Unable to sample any valid states for goal tree"。需将安全点挪进工作空间或移除方向约束。
+- **vlm_bridge error 分支死代码**: ✅ 已修复 (2026-06-13)。重复 `elif msg.data == "error"` 分支导致 `_handle_grab_error` (黑名单+失败计数+换目标) 永远不可达。已删除第一个冗余分支。
+- **观察位姿 IK**: 部分修复 (2026-06-13)。降级观察点已移除朝向约束 (use_orientation=False) 并改为多候补参数化列表 `fallback_observation_points`。但动态观察点仍保留朝向约束，position_only_ik=True 下 KDL 无法满足，仍可能 IK 失败→触发降级链。
 - **相机位置**: X+ 和 Y/Z 轴偏移效果未全部测试完成。
 - **PRE_GRASP 朝向**: `Ry(-90°)` 使 gripper X (approach direction) 指向世界 -Z。待实测验证指尖方向是否与夹爪物理匹配。
 - **AttachLink 脱离后物体翻转**: DetachLink 后 target_box 在 Gazebo 中周期性翻转 180°。
+- **_consecutive_failures 计数器未消费**: grab_action 中失败计数递增但无人检查——FAILED→IDLE 立即转换，不做重试上限。vlm_bridge 侧黑名单逻辑依赖此计数但因 error 分支 bug 从未生效 (已修复 blacklist 侧，但 grab_action 侧仍无自主中断)。
 
 ## 调试常用命令
 

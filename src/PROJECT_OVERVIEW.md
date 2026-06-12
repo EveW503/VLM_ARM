@@ -223,7 +223,7 @@ position_topic/
 - **Planning Scene 集成**: SETUP 阶段通过 `PlanningSceneManager` 将目标物体注册到 MoveIt（`add_object`），PRE_GRASP 自动绕行；APPROACH 通过 `allow_collision`/`remove_object` 让 MoveIt 不再避让
 - **双层同步**: GRASP 阶段同时操作 Gazebo (`AttachLink`) 和 MoveIt (`attach_object`)，PLACE 阶段两层一起清理
 - **夹爪时机**: APPROACH 阶段张爪（离目标仅 8cm，不会引入规划失败），SETUP/PRE_GRASP 保持闭合
-- **降级**: 阶段二超时 10s → 用 pre_grasp Z 偏移作为抓取位姿
+- **降级**: 阶段二超时 3s → 用 pre_grasp Z 偏移作为抓取位姿；动态观察点 IK 失败 → 依次尝试 `fallback_observation_points` 候补列表 (无朝向约束)
 - **反馈**: 发布 `/grab_status` 通知 vlm_bridge 阶段切换
 
 ##### planning_scene_manager — Planning Scene 操作封装
@@ -370,6 +370,13 @@ colcon build --symlink-install --packages-select lerobot_description position_to
 - [x] 循环采摘: grasp_complete → 重新 Stage1，直到无目标发布 task_complete
 - [x] 失败处理: 同目标连续 3 次失败 → 黑名单跳过
 
+### 已完成（Demo 稳定性修复 — 2026-06-13）
+- [x] vlm_bridge 重复 error 分支修复: 删除冗余分支，恢复目标黑名单+失败重试+换目标逻辑
+- [x] 观察位姿降级多候补: 参数化 `fallback_observation_points`，动态点失败后依次尝试 3 个候补 (无朝向约束)
+- [x] 状态机全局异常保护: `_transition` dispatch 包裹 try/except，防止 10 个状态入口未处理异常导致静默卡死
+- [x] VLM worker 线程竞态修复: generation counter 机制，`_grab_status_cb` 重置状态时作废运行中的 VLM 调用
+- [x] ROS 2 Humble 参数兼容: `fallback_observation_points` 由嵌套 list 改为平铺 list (Humble 不支持嵌套数组参数)
+
 ### 待完成（第三阶段）
 - [ ] 自然语言动态任务指令（"先摘红色的"）
 - [ ] MoveIt 碰撞场景动态管理（按 VLM 语义标签注册障碍物）
@@ -382,6 +389,7 @@ colcon build --symlink-install --packages-select lerobot_description position_to
 - **开环控制**: `arm_controller` 和 `gripper_controller` 使用 `open_loop_control: true`，无反馈校正
 - **目标位姿超出工作空间**: VLM 识别的草莓植株位置距离机械臂底座 ~0.45m，超过工作半径 ~0.35m，需将草莓植株挪近或使用更大工作空间的机械臂
 - **Joint 5 越限**: 某些姿态下关节 5 超过 URDF 限位 -2.79253 rad，导致后续规划失败
+- **grab_action 失败计数器未自限**: `_consecutive_failures` 递增后无人检查，FAILED→IDLE 后立即等待新目标，可无限重试同一失败目标 (vlm_bridge 端黑名单已修复, grab_action 端仍无自保)
 
 ### 坐标系注意事项
 - 机械臂是 **fixed-base** 机器人（`base_joint` 是 fixed 类型），直接锚定在 world 坐标系上，不依赖物理支撑
