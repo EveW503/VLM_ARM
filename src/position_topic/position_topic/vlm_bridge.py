@@ -145,6 +145,7 @@ class VlmBridge(Node):
         self._lock = threading.Lock()
         self._state = self.STAGE_IDLE
         self._vlm_in_progress = False
+        self._vlm_generation = 0  # VLM 调用版本号, worker 线程写结果前校验
         # 从 worker 线程到主线程的待发布消息队列
         self._pending_publish = None  # (topic_type, Point, quat_tuple) or None
         self._pending_rough = None    # (topic_type, Point) or None — P_rough 单独发布
@@ -209,10 +210,12 @@ class VlmBridge(Node):
                 self._targets_pool = []
                 self._current_target_idx = 0
                 self._target_fail_counts.clear()
+                self._vlm_generation += 1  # 作废正在运行的 VLM 调用
                 self._state = self.STAGE1_QUERY
 
             elif msg.data == "error":
                 self.get_logger().warning("收到抓取失败(error)，尝试下一个目标")
+                self._vlm_generation += 1  # 作废正在运行的 VLM 调用
                 self._handle_grab_error()
 
     def _handle_grab_error(self):
@@ -289,9 +292,11 @@ class VlmBridge(Node):
                 if self._gemini_info is None:
                     self.get_logger().warning("等待 Gemini335 camera_info...")
                     return
+                self._vlm_generation += 1
+                gen = self._vlm_generation
                 self._vlm_in_progress = True
                 self._state = self.STAGE1_QUERY  # keep state; thread will transition
-                threading.Thread(target=self._run_stage1).start()
+                threading.Thread(target=self._run_stage1, args=(gen,)).start()
 
             elif self._state == self.STAGE2_QUERY:
                 if self._ee_rgb is None:
@@ -303,12 +308,14 @@ class VlmBridge(Node):
                 if self._ee_info is None:
                     self.get_logger().warning("等待 ee_camera camera_info...")
                     return
+                self._vlm_generation += 1
+                gen = self._vlm_generation
                 self._vlm_in_progress = True
-                threading.Thread(target=self._run_stage2).start()
+                threading.Thread(target=self._run_stage2, args=(gen,)).start()
 
     # ── 阶段一: 全局推理 ───────────────────────────────
 
-    def _run_stage1(self):
+    def _run_stage1(self, gen):
         try:
             self.get_logger().info("阶段一: 调用 VLM (Gemini335)...")
             rgb = self._gemini_rgb
@@ -323,6 +330,8 @@ class VlmBridge(Node):
             if result is None:
                 self.get_logger().error("阶段一 VLM 调用失败")
                 with self._lock:
+                    if self._vlm_generation != gen:
+                        return  # 此调用已被取消
                     self._state = self.STAGE_IDLE
                     self._vlm_in_progress = False
                 return
@@ -340,6 +349,8 @@ class VlmBridge(Node):
                     self.get_logger().info("连续 2 次无目标, 任务完成")
                     self._publish_task_complete()
                 with self._lock:
+                    if self._vlm_generation != gen:
+                        return  # 此调用已被取消
                     self._state = self.STAGE_IDLE
                     self._vlm_in_progress = False
                 return
@@ -355,19 +366,23 @@ class VlmBridge(Node):
             self._current_target_idx = 0
 
             # 处理当前最优目标
-            success = self._process_current_target(rgb, depth, info)
+            success = self._process_current_target(rgb, depth, info, gen)
             if not success:
                 with self._lock:
+                    if self._vlm_generation != gen:
+                        return  # 此调用已被取消
                     self._state = self.STAGE_IDLE
                     self._vlm_in_progress = False
 
         except Exception as exc:
             self.get_logger().error(f"阶段一异常: {exc}")
             with self._lock:
+                if self._vlm_generation != gen:
+                    return  # 此调用已被取消
                 self._state = self.STAGE_IDLE
                 self._vlm_in_progress = False
 
-    def _process_current_target(self, rgb, depth, info):
+    def _process_current_target(self, rgb, depth, info, gen):
         """
         从当前 targets_pool 中选取当前索引的目标，执行 2D→3D 映射并发布。
 
@@ -464,6 +479,8 @@ class VlmBridge(Node):
             )
 
             with self._lock:
+                if self._vlm_generation != gen:
+                    return False  # 此调用已被取消
                 if not self._dry_run:
                     self._pending_publish = (
                         "observation",
@@ -509,7 +526,7 @@ class VlmBridge(Node):
 
     # ── 阶段二: 精确定位 ───────────────────────────────
 
-    def _run_stage2(self):
+    def _run_stage2(self, gen):
         try:
             self.get_logger().info("阶段二: 调用 VLM (ee_camera)...")
             rgb = self._ee_rgb
@@ -523,6 +540,8 @@ class VlmBridge(Node):
             if result is None:
                 self.get_logger().error("阶段二 VLM 调用失败")
                 with self._lock:
+                    if self._vlm_generation != gen:
+                        return
                     self._state = self.STAGE_IDLE
                     self._vlm_in_progress = False
                 return
@@ -535,6 +554,8 @@ class VlmBridge(Node):
             if bbox[0] < 0:
                 self.get_logger().warning("VLM 阶段二未发现目标")
                 with self._lock:
+                    if self._vlm_generation != gen:
+                        return
                     self._state = self.STAGE_IDLE
                     self._vlm_in_progress = False
                 return
@@ -555,6 +576,8 @@ class VlmBridge(Node):
             if Z is None:
                 self.get_logger().error("阶段二: 深度查询失败")
                 with self._lock:
+                    if self._vlm_generation != gen:
+                        return
                     self._state = self.STAGE_IDLE
                     self._vlm_in_progress = False
                 return
@@ -568,6 +591,8 @@ class VlmBridge(Node):
             if pt is None:
                 self.get_logger().error("阶段二: TF 变换失败 (ee_camera_optical_link→base)")
                 with self._lock:
+                    if self._vlm_generation != gen:
+                        return
                     self._state = self.STAGE_IDLE
                     self._vlm_in_progress = False
                 return
@@ -577,6 +602,8 @@ class VlmBridge(Node):
             )
 
             with self._lock:
+                if self._vlm_generation != gen:
+                    return
                 if not self._dry_run:
                     self._pending_publish = (
                         "target",
@@ -590,6 +617,8 @@ class VlmBridge(Node):
         except Exception as exc:
             self.get_logger().error(f"阶段二异常: {exc}")
             with self._lock:
+                if self._vlm_generation != gen:
+                    return
                 self._state = self.STAGE_IDLE
                 self._vlm_in_progress = False
 

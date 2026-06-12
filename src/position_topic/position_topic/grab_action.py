@@ -66,6 +66,11 @@ class GrabAction(Node):
         self.declare_parameter("target_object_dims", [0.03, 0.03, 0.03])
         self.declare_parameter("jaw_clearance", 0.03)
         self.declare_parameter("stage2_timeout", 3.0)
+        self.declare_parameter("fallback_observation_points", [
+            [0.20, 0.0, 0.22],
+            [0.18, 0.0, 0.20],
+            [0.22, 0.05, 0.18],
+        ])
 
         # --- Planning Scene Manager ---
         self._psm = PlanningSceneManager(self)
@@ -292,8 +297,8 @@ class GrabAction(Node):
         )
 
     def _on_observe_failed(self):
-        """动态观察点规划失败, 降级到绝对安全观察点。"""
-        self.get_logger().warn("动态观察点规划失败, 降级到硬编码安全观察点...")
+        """动态观察点规划失败, 依次尝试降级候补观察点。"""
+        self.get_logger().warn("动态观察点规划失败, 尝试候补观察点...")
 
         rough = self._pre_grasp_target
         if rough is None:
@@ -301,34 +306,39 @@ class GrabAction(Node):
             self._transition(self.FAILED)
             return
 
-        # 硬编码绝对安全观察点: 基座正前方偏上, X 远离死区
-        safe_x, safe_y, safe_z = 0.20, 0.0, 0.25
+        candidates = self.get_parameter("fallback_observation_points").value
+        if not candidates:
+            self.get_logger().error("fallback_observation_points 为空")
+            self._transition(self.FAILED)
+            return
+        self._try_fallback_observation(0, candidates)
 
-        # 计算从安全点看向 P_rough 的四元数
-        from .camera_utils import compute_lookat_quaternion
-        q = compute_lookat_quaternion(
-            (safe_x, safe_y, safe_z),
-            (rough.pose.position.x, rough.pose.position.y, rough.pose.position.z),
-        )
-        if q is None:
-            q = (0.0, 0.0, 0.0, 1.0)
+    def _try_fallback_observation(self, idx, candidates):
+        """尝试第 idx 个候补观察点, 失败则试下一个。"""
+        if idx >= len(candidates):
+            self.get_logger().error(f"所有 {len(candidates)} 个候补观察点均失败")
+            self._transition(self.FAILED)
+            return
 
+        rough = self._pre_grasp_target
+        safe_x, safe_y, safe_z = candidates[idx]
+
+        # 降级观察点只需位置, 不约束朝向
+        # position_only_ik=True 时 IK 求解器无法满足朝向约束
         fallback_pose = Pose(
             position=Point(x=safe_x, y=safe_y, z=safe_z),
-            orientation=Quaternion(x=q[0], y=q[1], z=q[2], w=q[3]),
+            orientation=Quaternion(w=1.0),
         )
 
         self.get_logger().info(
-            f"安全观察点: pos=({safe_x:.3f}, {safe_y:.3f}, {safe_z:.3f}), "
-            f"看向 P_rough"
+            f"候补观察点 [{idx+1}/{len(candidates)}]: "
+            f"pos=({safe_x:.3f}, {safe_y:.3f}, {safe_z:.3f})"
         )
 
-        # 安全点只需要位置到达, 不要朝向约束
-        # position_only_ik=True 时 IK 求解器无法同时满足朝向, 加了反而导致规划失败
         self._send_move_request(
             fallback_pose, "base",
             success_callback=self._on_observe_done,
-            fail_callback=lambda: self._transition(self.FAILED),
+            fail_callback=lambda: self._try_fallback_observation(idx + 1, candidates),
             use_orientation=False,
             pos_tolerance=0.02,
         )
