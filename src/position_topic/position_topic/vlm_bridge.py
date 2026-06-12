@@ -4,6 +4,7 @@ VLM Bridge 节点: 双阶段 VLM 推理 + 2D→3D 映射 + 目标位姿发布。
 阶段一: Gemini 335 全局推理 → 粗定位 → /target_pre_grasp
 阶段二: ee_camera 近距精定位 → /target_pose
 """
+import json
 import threading
 
 import rclpy
@@ -26,6 +27,37 @@ from .prompts import (
     DEFAULT_STAGE2_USER_INSTRUCTION,
 )
 from .vlm_client import VlmClient
+
+
+# ── 目标排序 ─────────────────────────────────────────
+
+RIPENESS_ORDER = {"ripe": 0, "overripe": 1, "unripe": 2}
+OBSTACLE_ORDER = {"none": 0, "leaf": 1, "stem": 2}
+
+
+def rank_targets(targets):
+    """
+    对 VLM 返回的目标列表按优先级排序。
+
+    排序 key: 成熟度(ripe优先) > 上方无障碍 > 置信度高 > 原始索引
+
+    Args:
+        targets: list[dict], 每个 dict 包含:
+            ripeness (str), obstacle_above (str), confidence (float)
+
+    Returns:
+        list[dict]: 排序后的目标列表 (最优在前)
+    """
+    def _sort_key(item):
+        idx, t = item
+        ripeness_score = RIPENESS_ORDER.get(t.get("ripeness", "unripe"), 2)
+        obstacle_score = OBSTACLE_ORDER.get(t.get("obstacle_above", "leaf"), 2)
+        # 置信度取负值 → 高置信度排前面
+        return (ripeness_score, obstacle_score, -t.get("confidence", 0.0), idx)
+
+    indexed = list(enumerate(targets))
+    indexed.sort(key=_sort_key)
+    return [t for _, t in indexed]
 
 
 class VlmBridge(Node):
@@ -100,6 +132,14 @@ class VlmBridge(Node):
         self._observation_pub = self.create_publisher(
             PoseStamped, "/target_observation_pose", 10
         )
+        # --- 目标元数据发布 (材质、遮挡信息等) ---
+        self._metadata_pub = self.create_publisher(
+            String, "/target_metadata", 10
+        )
+        # --- 任务状态发布 (task_complete) ---
+        self._task_status_pub = self.create_publisher(
+            String, "/task_status", 10
+        )
 
         # --- 状态机 ---
         self._lock = threading.Lock()
@@ -109,6 +149,13 @@ class VlmBridge(Node):
         self._pending_publish = None  # (topic_type, Point, quat_tuple) or None
         self._pending_rough = None    # (topic_type, Point) or None — P_rough 单独发布
         self._state_timer = self.create_timer(0.1, self._state_machine_tick)
+
+        # --- 多目标状态 ---
+        self._targets_pool = []       # 当前轮次排序后的目标列表
+        self._current_target_idx = 0  # 当前选中目标在 pool 中的索引
+        self._target_fail_counts = {}  # {label: fail_count} 跟踪每个目标失败次数
+        self._target_blacklist = set()  # 黑名单目标标签集合
+        self._consecutive_empty_stage1 = 0  # 连续空 Stage1 计数
 
         self.get_logger().info("VLM Bridge 节点已启动")
 
@@ -163,6 +210,43 @@ class VlmBridge(Node):
                 self._vlm_in_progress = False
                 self._pending_publish = None
                 self._pending_rough = None
+
+            elif msg.data == "grasp_complete":
+                self.get_logger().info("收到 grasp_complete, 重新触发阶段一")
+                self._targets_pool = []
+                self._current_target_idx = 0
+                self._target_fail_counts.clear()
+                self._state = self.STAGE1_QUERY
+
+            elif msg.data == "error":
+                self.get_logger().warning("收到抓取失败(error)，尝试下一个目标")
+                self._handle_grab_error()
+
+    def _handle_grab_error(self):
+        """处理抓取失败: 递增失败计数，如果超阈值则加入黑名单。"""
+        if self._current_target_idx < len(self._targets_pool):
+            target = self._targets_pool[self._current_target_idx]
+            label = target.get("label", "unknown")
+            bbox = target.get("bbox", [0, 0, 0, 0])
+            target_key = f"{label}_{bbox[0]}_{bbox[1]}_{bbox[2]}_{bbox[3]}"
+
+            count = self._target_fail_counts.get(target_key, 0) + 1
+            self._target_fail_counts[target_key] = count
+            self.get_logger().warning(
+                f"目标 '{label}' 失败 {count}/3 次"
+            )
+            if count >= 3:
+                self.get_logger().error(
+                    f"目标 '{label}' 连续失败 3 次, 加入黑名单"
+                )
+                self._target_blacklist.add(target_key)
+
+            # 重新 Stage1 = rank_targets 会再次排序，黑名单目标被 process_current_target 跳过
+            self.get_logger().info("重新 Stage1 以选择下一个目标")
+        self._state = self.STAGE1_QUERY
+        self._vlm_in_progress = False
+        self._pending_publish = None
+        self._pending_rough = None
 
     # ── 状态机 ─────────────────────────────────────────
 
@@ -240,7 +324,8 @@ class VlmBridge(Node):
 
             img_b64 = self._vlm.encode_image(rgb)
             result = self._vlm.call_vlm(
-                STAGE1_SYSTEM_PROMPT, self._task_instruction, img_b64
+                STAGE1_SYSTEM_PROMPT, self._task_instruction, img_b64,
+                max_tokens=500,
             )
             if result is None:
                 self.get_logger().error("阶段一 VLM 调用失败")
@@ -249,21 +334,76 @@ class VlmBridge(Node):
                     self._vlm_in_progress = False
                 return
 
-            target = result.get("target", {})
-            bbox = target.get("bbox", [-1, -1, -1, -1])
-            confidence = target.get("confidence", 0.0)
-            label = target.get("label", "unknown")
-            direction = target.get("optimal_approach_direction", "top")
-            self.get_logger().info(f"VLM 建议观察方向: {direction}")
+            # 解析多目标列表
+            targets = result.get("targets", [])
+            obstacles = result.get("obstacles", [])
 
-            if bbox[0] < 0:
-                self.get_logger().warning("VLM 未发现可采摘目标")
+            if not targets:
+                self.get_logger().warning(
+                    f"VLM 未发现可采摘目标 (targets=[]), obstacles={len(obstacles)} 个"
+                )
+                self._consecutive_empty_stage1 += 1
+                if self._consecutive_empty_stage1 >= 2:
+                    self.get_logger().info("连续 2 次无目标, 任务完成")
+                    self._publish_task_complete()
                 with self._lock:
                     self._state = self.STAGE_IDLE
                     self._vlm_in_progress = False
                 return
+            self._consecutive_empty_stage1 = 0
 
-            # Qwen3-VL bbox 使用归一化坐标 [0, 1000] → 转换为实际像素坐标
+            self.get_logger().info(
+                f"Stage1 发现 {len(targets)} 个目标, {len(obstacles)} 个障碍物"
+            )
+
+            # 排序: 成熟度 > 无障碍 > 置信度
+            sorted_targets = rank_targets(targets)
+            self._targets_pool = sorted_targets
+            self._current_target_idx = 0
+
+            # 处理当前最优目标
+            success = self._process_current_target(rgb, depth, info)
+            if not success:
+                with self._lock:
+                    self._state = self.STAGE_IDLE
+                    self._vlm_in_progress = False
+
+        except Exception as exc:
+            self.get_logger().error(f"阶段一异常: {exc}")
+            with self._lock:
+                self._state = self.STAGE_IDLE
+                self._vlm_in_progress = False
+
+    def _process_current_target(self, rgb, depth, info):
+        """
+        从当前 targets_pool 中选取当前索引的目标，执行 2D→3D 映射并发布。
+
+        Returns:
+            bool: True 如果目标处理成功并已发布
+        """
+        while self._current_target_idx < len(self._targets_pool):
+            target = self._targets_pool[self._current_target_idx]
+            bbox = target.get("bbox", [-1, -1, -1, -1])
+            confidence = target.get("confidence", 0.0)
+            label = target.get("label", "unknown")
+            direction = target.get("optimal_approach_direction", "top")
+            material = target.get("material", "soft")
+            ripeness = target.get("ripeness", "unripe")
+            obstacle_above = target.get("obstacle_above", "none")
+
+            # Check blacklist
+            target_key = f"{label}_{bbox[0]}_{bbox[1]}_{bbox[2]}_{bbox[3]}"
+            if target_key in self._target_blacklist:
+                self.get_logger().info(f"目标 {label} 在黑名单中, 跳过")
+                self._current_target_idx += 1
+                continue
+
+            if bbox[0] < 0:
+                self.get_logger().warning(f"目标 {label} bbox 无效, 跳过")
+                self._current_target_idx += 1
+                continue
+
+            # Qwen3-VL bbox 坐标转换 [0,1000] → 像素
             x1 = int(bbox[0] / 1000.0 * rgb.width)
             y1 = int(bbox[1] / 1000.0 * rgb.height)
             x2 = int(bbox[2] / 1000.0 * rgb.width)
@@ -272,20 +412,17 @@ class VlmBridge(Node):
             cy = (y1 + y2) // 2
 
             self.get_logger().info(
-                f"阶段一结果: bbox_norm={bbox} → pixel=[{x1},{y1},{x2},{y2}] "
-                f"center=[{cx},{cy}] label={label} conf={confidence:.2f}"
+                f"选中目标 [{self._current_target_idx}/{len(self._targets_pool)}]: "
+                f"{label} ripeness={ripeness} material={material} "
+                f"obstacle={obstacle_above} dir={direction} conf={confidence:.2f}"
             )
 
-            # bbox 区域内最小深度 = 目标顶部 (排除地面背景)
             Z = get_min_depth_in_region(depth, x1, y1, x2, y2)
             if Z is None:
-                self.get_logger().error("阶段一: 深度查询失败")
-                with self._lock:
-                    self._state = self.STAGE_IDLE
-                    self._vlm_in_progress = False
-                return
+                self.get_logger().error(f"目标 {label} 深度查询失败")
+                self._current_target_idx += 1
+                continue
 
-            # XY 用 bbox 中心，Z 用区域内最小值
             X_cam, Y_cam, Z_cam = pixel_to_camera_3d(cx, cy, Z, info)
             pt = transform_point(
                 self._tf_buffer,
@@ -293,20 +430,16 @@ class VlmBridge(Node):
                 "camera_depth_optical_frame", "base",
             )
             if pt is None:
-                self.get_logger().error("阶段一: TF 变换失败 (camera_depth_optical_frame→base)")
-                with self._lock:
-                    self._state = self.STAGE_IDLE
-                    self._vlm_in_progress = False
-                return
+                self.get_logger().error(f"目标 {label} TF 变换失败")
+                self._current_target_idx += 1
+                continue
 
-            p_rough = pt  # (x, y, z) in base frame
-
+            p_rough = pt
             self.get_logger().info(
-                f"阶段一 3D rough (base): ({p_rough[0]:.4f}, {p_rough[1]:.4f}, {p_rough[2]:.4f})"
+                f"3D rough (base): ({p_rough[0]:.4f}, {p_rough[1]:.4f}, {p_rough[2]:.4f})"
             )
 
-            # 方位偏移映射 (base 坐标系, 单位: 米)
-            # SO101 是小型前伸臂, 偏移量需保守避免进入基座死区
+            # 方位偏移 → 观察点
             DIRECTION_OFFSETS = {
                 "front":       (-0.06,  0.00,  0.10),
                 "left":        ( 0.00,  0.08,  0.10),
@@ -317,12 +450,10 @@ class VlmBridge(Node):
             }
             offset = DIRECTION_OFFSETS.get(direction, DIRECTION_OFFSETS["top"])
 
-            # 计算观察点坐标 P_obs = P_rough + offset
             obs_x = p_rough[0] + offset[0]
             obs_y = p_rough[1] + offset[1]
             obs_z = p_rough[2] + offset[2]
 
-            # 机械臂安全工作区保护: SO101 末端缩回 X<0.10 会引发自碰撞/奇异点
             if obs_x < 0.10:
                 self.get_logger().warn(
                     f"观察点 X={obs_x:.3f} 进入基座死区, 强制钳制至 X=0.10"
@@ -330,27 +461,22 @@ class VlmBridge(Node):
                 obs_x = 0.10
 
             p_obs = (obs_x, obs_y, obs_z)
-
-            # 计算 LookAt 四元数 (从 P_obs 看向 P_rough)
             q = compute_lookat_quaternion(p_obs, p_rough)
             if q is None:
                 self.get_logger().error("LookAt 四元数计算失败, 降级为 identity")
                 q = (0.0, 0.0, 0.0, 1.0)
 
             self.get_logger().info(
-                f"观察位姿 (base): pos=({p_obs[0]:.4f}, {p_obs[1]:.4f}, {p_obs[2]:.4f}) "
-                f"ori=({q[0]:.3f}, {q[1]:.3f}, {q[2]:.3f}, {q[3]:.3f})"
+                f"观察位姿 (base): pos=({p_obs[0]:.4f}, {p_obs[1]:.4f}, {p_obs[2]:.4f})"
             )
 
             with self._lock:
                 if not self._dry_run:
-                    # 发布观察位姿
                     self._pending_publish = (
                         "observation",
                         Point(x=p_obs[0], y=p_obs[1], z=p_obs[2]),
                         q,
                     )
-                    # 同时发布 P_rough 供 grab_action 注册碰撞物体和降级回退
                     self._pending_rough = (
                         "pre_grasp",
                         Point(x=p_rough[0], y=p_rough[1], z=p_rough[2]),
@@ -358,11 +484,35 @@ class VlmBridge(Node):
                 self._state = self.STAGE1_WAIT
                 self._vlm_in_progress = False
 
-        except Exception as exc:
-            self.get_logger().error(f"阶段一异常: {exc}")
-            with self._lock:
-                self._state = self.STAGE_IDLE
-                self._vlm_in_progress = False
+            # 发布元数据
+            if not self._dry_run:
+                self._publish_metadata(material, obstacle_above, direction, ripeness, label)
+
+            return True
+
+        self.get_logger().warning("targets_pool 已耗尽, 需要重新 Stage1")
+        return False
+
+    def _publish_metadata(self, material, obstacle_above, direction, ripeness, label):
+        """发布当前目标的语义元数据到 /target_metadata。"""
+        meta = {
+            "material": material,
+            "obstacle_above": obstacle_above,
+            "optimal_approach_direction": direction,
+            "ripeness": ripeness,
+            "label": label,
+        }
+        msg = String()
+        msg.data = json.dumps(meta, ensure_ascii=False)
+        self._metadata_pub.publish(msg)
+        self.get_logger().info(f"已发布 /target_metadata: {msg.data}")
+
+    def _publish_task_complete(self):
+        """发布任务完成信号。"""
+        msg = String()
+        msg.data = "task_complete"
+        self._task_status_pub.publish(msg)
+        self.get_logger().info("已发布 /task_status: task_complete — 采摘任务结束")
 
     # ── 阶段二: 精确定位 ───────────────────────────────
 
