@@ -66,11 +66,8 @@ class GrabAction(Node):
         self.declare_parameter("target_object_dims", [0.03, 0.03, 0.03])
         self.declare_parameter("jaw_clearance", 0.03)
         self.declare_parameter("stage2_timeout", 3.0)
-        self.declare_parameter("fallback_observation_points", [
-            [0.20, 0.0, 0.22],
-            [0.18, 0.0, 0.20],
-            [0.22, 0.05, 0.18],
-        ])
+        self.declare_parameter("fallback_observation_points",
+            [0.20, 0.0, 0.22,  0.18, 0.0, 0.20,  0.22, 0.05, 0.18])
 
         # --- Planning Scene Manager ---
         self._psm = PlanningSceneManager(self)
@@ -306,11 +303,13 @@ class GrabAction(Node):
             self._transition(self.FAILED)
             return
 
-        candidates = self.get_parameter("fallback_observation_points").value
-        if not candidates:
-            self.get_logger().error("fallback_observation_points 为空")
+        raw = self.get_parameter("fallback_observation_points").value
+        if not raw or len(raw) < 3:
+            self.get_logger().error("fallback_observation_points 为空或不足 3 个元素")
             self._transition(self.FAILED)
             return
+        # 平铺 list → 每 3 个一组: [x1,y1,z1, x2,y2,z2, ...]
+        candidates = [raw[i:i+3] for i in range(0, len(raw), 3)]
         self._try_fallback_observation(0, candidates)
 
     def _try_fallback_observation(self, idx, candidates):
