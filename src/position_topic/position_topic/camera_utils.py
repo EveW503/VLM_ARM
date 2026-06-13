@@ -100,6 +100,49 @@ def get_min_depth_in_region(depth_msg, x1, y1, x2, y2):
     return None
 
 
+def get_median_depth_at_center(depth_msg, cx, cy, half_window=2):
+    """
+    提取中心像素 (cx, cy) 附近 (2*half_window+1)×(2*half_window+1) 区域的中值深度。
+
+    与 get_min_depth_in_region 不同: 本函数使用中心区域中值, 避免 bbox 边缘
+    (叶子、茎等突出物) 的最小深度污染中心像素的深度估计, 防止 X/Y 坐标漂移。
+
+    Args:
+        depth_msg: sensor_msgs/Image, encoding "16UC1" (mm) 或 "32FC1" (m)
+        cx: int, 中心像素列坐标
+        cy: int, 中心像素行坐标
+        half_window: int, 半窗口大小 (默认 2 → 5×5 区域)
+
+    Returns:
+        float: 中值深度 (米), 或 None (区域全无效)
+    """
+    cx, cy = int(cx), int(cy)
+
+    enc = depth_msg.encoding
+    if enc == "32FC1":
+        data = np.frombuffer(depth_msg.data, dtype=np.float32).reshape(
+            depth_msg.height, depth_msg.width)
+        scale = 1.0
+        invalid = np.isnan
+    elif enc == "16UC1":
+        data = np.frombuffer(depth_msg.data, dtype=np.uint16).reshape(
+            depth_msg.height, depth_msg.width)
+        scale = 1.0 / 1000.0
+        invalid = lambda x: x == 0
+    else:
+        return None
+
+    h, w = data.shape
+    y_min, y_max = max(0, cy - half_window), min(h, cy + half_window + 1)
+    x_min, x_max = max(0, cx - half_window), min(w, cx + half_window + 1)
+
+    region = data[y_min:y_max, x_min:x_max]
+    valid = region[~invalid(region)]
+    if len(valid) == 0:
+        return None
+    return float(np.median(valid)) * scale
+
+
 def pixel_to_camera_3d(u, v, Z, camera_info):
     """
     针孔相机模型反投影: 像素坐标 + 深度 → 相机光学坐标系 3D 点。

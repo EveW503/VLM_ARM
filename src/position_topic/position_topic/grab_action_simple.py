@@ -260,7 +260,9 @@ class GrabActionSimple(Node):
             y=self._pre_grasp_target.pose.position.y,
             z=pre_grasp_z,
         )
-        pre_grasp_pose.orientation = Quaternion(w=1.0)  # placeholder, 不参与约束
+        # 强制末端垂直向下: Ry(-90°) → gripper X 指向世界 -Z (接近方向)
+        sqrt2_2 = math.sqrt(2) / 2.0
+        pre_grasp_pose.orientation = Quaternion(x=0.0, y=-sqrt2_2, z=0.0, w=sqrt2_2)
 
         self._pre_grasp_orientation = None  # 到达后从 TF 查询
 
@@ -268,7 +270,7 @@ class GrabActionSimple(Node):
             pre_grasp_pose, self._pre_grasp_target.header.frame_id or "world",
             success_callback=self._on_pre_grasp_done,
             fail_callback=lambda: self._transition(self.FAILED),
-            use_orientation=False,
+            use_orientation=True,
             pos_tolerance=0.03,
         )
 
@@ -429,14 +431,20 @@ class GrabActionSimple(Node):
             self._transition(self.FAILED)
             return
 
-        dims = self.get_parameter("target_object_dims").value
         jaw_clearance = self.get_parameter("jaw_clearance").value
 
+        # 夹爪 TCP 到指尖的实际长度 (需根据 URDF 微调)
+        finger_length_offset = 0.05
+        # 期望指尖包住物体上表面的深度
+        grasp_depth = 0.02
+
         # P_rough = 物体上表面 (深度相机首击点)
-        # 夹爪目标 = 物体中心 + 夹爪几何补偿
+        # TCP 目标 Z = 上表面 + 指尖长度补偿 - 抓取深度 + 夹爪几何补偿
+        # 这样指尖到达上表面下方 grasp_depth 处，TCP 停在上表面上方安全位置
         target_z = (self._pre_grasp_target.pose.position.z
-                    - dims[2] / 2.0    # 上表面 → 物体中心
-                    + jaw_clearance)    # 夹爪几何补偿
+                    + finger_length_offset
+                    - grasp_depth
+                    + jaw_clearance)
 
         approach_waypoint = Pose()
         approach_waypoint.position = Point(
@@ -453,7 +461,8 @@ class GrabActionSimple(Node):
             f"APPROACH waypoint: pos=({approach_waypoint.position.x:.3f}, "
             f"{approach_waypoint.position.y:.3f}, {approach_waypoint.position.z:.3f})"
             f" (P_rough={self._pre_grasp_target.pose.position.z:.3f}"
-            f" - {dims[2]/2:.3f} + {jaw_clearance:.3f})"
+            f" + finger={finger_length_offset:.3f} - grasp={grasp_depth:.3f}"
+            f" + jaw={jaw_clearance:.3f})"
         )
 
         req = GetCartesianPath.Request()

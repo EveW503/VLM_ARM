@@ -379,11 +379,10 @@ class GrabAction(Node):
             self._transition(self.FAILED)
             return
 
-        # 从 planning scene 移除目标，让 MoveIt 不再避让（即将靠近目标）
+        # 物体保留在 Planning Scene 中，MoveIt 自动避让规划
+        # 等到 APPROACH Cartesian 下探前再由 _on_approach_open_done 移除
         if self._target_object_registered:
-            self._psm.remove_object("target")
-            self._target_object_registered = False
-            self.get_logger().info("目标已从 Planning Scene 移除")
+            self.get_logger().info("PRE_GRASP: 物体留在场景中, MoveIt 自行避让")
 
         z_offset = self.get_parameter("pre_grasp_z_offset").value
 
@@ -549,12 +548,23 @@ class GrabAction(Node):
         # 构建下探航点: 位置取精确目标, 朝向强制垂直向下 Ry(-90°)
         # 避免直接使用 self._grasp_target.pose (其 orientation 为 w=1.0 水平朝向)
         # 导致 Cartesian 插值时末端翻转 90°
+
+        # 夹爪 TCP 到指尖的实际长度 (需根据 URDF 微调)
+        finger_length_offset = 0.05
+        # 期望指尖包住物体上表面的深度
+        grasp_depth = 0.02
+        # TCP 目标 Z 补偿: 避免 TCP 到达物体中心导致指尖刺穿
+        # self._grasp_target.pose.position.z 已在上层包含 jaw_clearance
+        target_z = (self._grasp_target.pose.position.z
+                    + finger_length_offset
+                    - grasp_depth)
+
         sqrt2_2 = math.sqrt(2) / 2.0
         approach_pose = Pose()
         approach_pose.position = Point(
             x=self._grasp_target.pose.position.x,
             y=self._grasp_target.pose.position.y,
-            z=self._grasp_target.pose.position.z,
+            z=target_z,
         )
         approach_pose.orientation = Quaternion(
             x=0.0, y=-sqrt2_2, z=0.0, w=sqrt2_2,

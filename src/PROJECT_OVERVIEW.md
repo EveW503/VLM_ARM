@@ -28,19 +28,14 @@ lerobot_ws/src/
 | `b99ccab` | 在 Gazebo 中添加待抓取目标与深度相机，实现基本系统搭建 |
 | `cc931c3` | 修改 README 文档 |
 
-### 未提交的重要改动（当前工作区状态）
+### 已提交的重大改动（2026-06-13 及之后）
 
-| 文件 | 改动 |
-|------|------|
-| `lerobot_description/launch/so101_gazebo.launch.py` | World 文件切为 `pick_place_strawberry.world`；添加 `GAZEBO_MODEL_PATH` |
-| `lerobot_description/urdf/so101_base.xacro` | `base_joint` z 偏移设为 `0.175`（机械臂底座放在 bed 顶面） |
-| `lerobot_description/urdf/so101.urdf.xacro` | 引入 `so101_camera_in_hand.xacro` 并挂载到 gripper |
-| `lerobot_description/urdf/so101_camera_in_hand.xacro` | **新文件**：手眼深度相机宏（`ee_camera_` 命名前缀） |
-| `position_topic/setup.py` | 改为 `os.walk()` 递归安装 models/ 和 worlds/ 子目录 |
-| `position_topic/models/bed/` | **新目录**：草莓种植床模型（11 个文件：SDF + COLLADA 网格 + 纹理） |
-| `position_topic/models/dirt_plane/` | **新目录**：泥土地面模型（含 ~60MB 纹理） |
-| `position_topic/models/random_strawberry_plant/` | **新目录**：程序化草莓植株（124 个文件：SDF + ERB 模板 + 网格 + 纹理） |
-| `position_topic/worlds/pick_place_strawberry.world` | **新文件**：合并草莓场景 + LinkAttacher 的世界文件 |
+| 日期 | 提交 | 说明 |
+|------|------|------|
+| 2026-06-14 | `66d078a` | wrist-flip 修复：Cartesian APPROACH/PUSH_SWEEP 强制 Ry(-90°) 朝向；简化版管线（*_simple）；target_box 物理参数修正（5cm³, 5.0kg, gravity）；base_joint Z 归零 |
+| 2026-06-13 | `9a23ad4` | Demo 稳定性修复：vlm_bridge error 分支、观察位姿多候补降级、状态机异常保护、VLM 线程竞态 |
+| 2026-06-12 | `66bf4a2` | 多目标软硬识别 + PUSH_SWEEP + 循环采摘 + /target_metadata |
+| 2026-06-11 前 | 多个 | 草莓场景移植（bed/dirt_plane/plant）、手眼相机 URDF、setup.py os.walk 安装
 
 ---
 
@@ -61,7 +56,7 @@ lerobot_description/
 ├── urdf/
 │   ├── so101.urdf.xacro             # 主入口——引用下面所有 xacro 文件，挂载手眼相机
 │   ├── so101_base.xacro             # 本体结构: 6 个 link + 6 个关节 + 传动定义
-│   │                                #   base_joint z=0.175 (放在 bed 顶面)
+│   │                                #   base_joint z=0.0 (基坐标系与世界重合)
 │   ├── so101_gazebo.xacro           # Gazebo 插件: libgazebo_ros2_control.so
 │   ├── so101_ros2_control.xacro     # ros2_control 硬件接口: GazeboSystem, 6 个位置控制关节
 │   └── so101_camera_in_hand.xacro   # 手眼相机宏: 固定在 gripper 上的深度相机 (640x480@30Hz)
@@ -76,7 +71,7 @@ lerobot_description/
 
 ```
 world (原点)
-  └── base_joint (fixed, xyz="0 0 0.175")
+  └── base_joint (fixed, xyz="0 0 0.0")
         └── base
               └── joint 1 (revolute, ±1.92 rad) → shoulder
                     └── joint 2 (revolute, ±1.75 rad) → upper_arm
@@ -89,7 +84,7 @@ world (原点)
 ```
 
 **关键设计点**:
-- `base_joint` z=0.175：将机械臂底座抬高到 bed 碰撞体顶面以上，视觉上坐落在 raised bed 上
+- `base_joint` z=0.0：机械臂底座直接放在 world 原点（基坐标系与世界坐标系重合）
 - 所有关节使用 `PositionJointInterface` + `SimpleTransmission`
 - 手眼相机使用 `ee_camera_` 前缀命名（避免与外部 Gemini 335 相机的 `camera_link` 冲突）
 
@@ -154,24 +149,27 @@ world (原点)
 
 ```
 position_topic/
-├── setup.py                          # 递归安装 models/ worlds/ launch/；注册 4 个入口点
+├── setup.py                          # 递归安装 models/ worlds/ launch/；注册 6 个入口点
 ├── position_topic/
 │   ├── position_publisher.py         # 目标位置发布节点 (PoseStamped @ 1Hz)
 │   ├── position_subscriber.py        # 目标位姿订阅→MoveIt 规划执行（手动调试用）
 │   ├── vlm_bridge.py                 # VLM 双阶段推理：多目标识别→排序→循环采摘 + 软硬分类
 │   ├── vlm_client.py                 # VLM API 封装：图像编码 + DashScope 调用 + JSON 解析
 │   ├── camera_utils.py               # 相机工具：深度查询 + 反投影 + TF2 变换 + LookAt
-│   ├── prompts.py                    # VLM System Prompt 模板（阶段一多目标/阶段二）
+│   ├── prompts.py                    # VLM System Prompt 模板（阶段一/阶段二/通用阶段一）
 │   ├── grab_action.py               # 抓取11阶段状态机：SETUP→观察→预抓取→[推扫]→接近→...
+│   ├── grab_action_simple.py         # 简化版9阶段状态机：去观察/阶段二，TF查姿态+Z修正
+│   ├── vlm_bridge_simple.py          # 简化版VLM桥接：仅阶段一，无ee_camera/观察位姿
 │   ├── planning_scene_manager.py     # Planning Scene 封装：物体/碰撞/附着管理
 │   ├── push_sweep.py                 # 推扫排障轨迹生成：水平推扫软障碍物（叶片）
 │   └── camera_axis_calibrator.py     # 相机轴标定诊断节点（Gazebo 逐姿态轴观察）
 ├── launch/
 │   ├── move_demo.launch.py           # 总启动器（含 vlm_bridge + grab_action）
 │   ├── test_no_strawberry.launch.py  # 纯方块测试启动器
+│   ├── test_no_strawberry_simple.launch.py  # 简化版纯方块测试（无阶段二）
 │   └── camera_calibrate.launch.py    # 相机轴标定启动器
 ├── models/
-│   ├── target_box.sdf                # 红色抓取目标: 3cm³ 立方体, 0.05kg
+│   ├── target_box.sdf                # 红色抓取目标: 5cm³ 立方体, 5.0kg, gravity enabled
 │   ├── camera.sdf                    # 外部深度相机: Gemini 335, 640x480@30Hz
 │   ├── bed/                          # 草莓种植床: COLLADA 网格, 碰撞体 2×3.2×0.35m
 │   ├── dirt_plane/                   # 泥土地面: 100×100m 平面, OGRE 材质纹理
@@ -188,7 +186,7 @@ position_topic/
 | `dirt_plane` | `(0, 0, 0)` | 泥土地面，z=0 |
 | `bed` | `(0, 0.5737, -0.25)` | 种植床，碰撞体 0.35m 高 → 顶面在 z≈-0.075 |
 | `random_strawberry_plant` | `(0.25, 0.25, 0.20)` | 植株根部，果实距地面约 z≈0.21-0.22 |
-| SO101 base_joint | `(0, 0, 0.175)` | 机械臂底座在 bed 上方 |
+| SO101 base_joint | `(0, 0, 0.0)` | 机械臂底座在世界原点 |
 | `target_box` | `(0.2, 0, 0.015)` | 抓取用目标方块（保留） |
 | Gemini 335 相机 | `(0.3, 0, 0.8)` | 外部深度相机，俯视 |
 
@@ -377,6 +375,13 @@ colcon build --symlink-install --packages-select lerobot_description position_to
 - [x] VLM worker 线程竞态修复: generation counter 机制，`_grab_status_cb` 重置状态时作废运行中的 VLM 调用
 - [x] ROS 2 Humble 参数兼容: `fallback_observation_points` 由嵌套 list 改为平铺 list (Humble 不支持嵌套数组参数)
 
+### 已完成（Wrist-flip 修复 + 物理参数修正 — 2026-06-14）
+- [x] Cartesian 下探/推扫 wrist-flip 修复: `_plan_approach` + `_do_push_sweep` 强制 Ry(-90°) 垂直向下朝向，避免末端翻转 90°
+- [x] 简化版抓取管线: `grab_action_simple.py` + `vlm_bridge_simple.py`（去阶段二/观察位姿）
+- [x] 通用 VLM Prompt: `GENERIC_STAGE1_SYSTEM_PROMPT` 支持非草莓场景
+- [x] target_box 物理参数修正: 启用 gravity，质量 0.05→5.0kg，尺寸 0.03→0.05m（抑制脱离后翻转）
+- [x] base_joint Z 归零: 0.175→0.0，基坐标系与世界坐标系重合
+
 ### 待完成（第三阶段）
 - [ ] 自然语言动态任务指令（"先摘红色的"）
 - [ ] MoveIt 碰撞场景动态管理（按 VLM 语义标签注册障碍物）
@@ -384,7 +389,7 @@ colcon build --symlink-install --packages-select lerobot_description position_to
 
 ### 已知 Bug
 
-- **AttachLink 脱离后物体翻转**: DetachLink 后 target_box 的 box_link 在 Gazebo 中周期性翻转 180°，疑似脱离瞬间父 link 角速度残留或 joint 未完全清除 (2026-06-12 排查中)
+- **AttachLink 脱离后物体翻转**: DetachLink 后 target_box 在 Gazebo 中周期性翻转 180°。已通过增大质量(5.0kg)和启用重力缓解 (2026-06-14)，待实测确认是否根除
 - **碰撞禁用不完整**: MoveIt SRDF 中未禁用机械臂与草莓场景模型（bed/plant/dirt）之间的碰撞检测
 - **开环控制**: `arm_controller` 和 `gripper_controller` 使用 `open_loop_control: true`，无反馈校正
 - **目标位姿超出工作空间**: VLM 识别的草莓植株位置距离机械臂底座 ~0.45m，超过工作半径 ~0.35m，需将草莓植株挪近或使用更大工作空间的机械臂

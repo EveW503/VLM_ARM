@@ -11,10 +11,12 @@ lerobot_ws/src/
 ├── lerobot_moveit/         # MoveIt 2 运动规划配置 + SRDF
 ├── position_topic/         # 核心抓取逻辑 ← 主要开发包
 │   ├── vlm_bridge.py       # VLM 多目标推理 + rank_targets 排序 + 循环采摘控制
+│   ├── vlm_bridge_simple.py # 简化版 VLM 桥接 (仅阶段一, 无 ee_camera/观察位姿)
 │   ├── grab_action.py      # 11 阶段抓取状态机 + PUSH_SWEEP 推扫排障 + MoveIt
+│   ├── grab_action_simple.py # 简化版 9 阶段状态机 (去观察/阶段二, TF 查姿态)
 │   ├── vlm_client.py       # DashScope OpenAI 兼容 API 调用封装 (max_tokens=500)
 │   ├── camera_utils.py     # 深度查询、像素反投影、TF2 变换、LookAt 四元数
-│   ├── prompts.py          # VLM System Prompt 模板 (阶段一多目标/阶段二)
+│   ├── prompts.py          # VLM System Prompt 模板 (阶段一多目标/阶段二/通用阶段一)
 │   ├── push_sweep.py       # 推扫排障轨迹生成 (3 Cartesian 航点)
 │   ├── planning_scene_manager.py  # Planning Scene 物体/碰撞/附着管理
 │   ├── position_subscriber.py     # 调试用 — 手动目标位姿→MoveGroup
@@ -35,6 +37,9 @@ ros2 launch position_topic move_demo.launch.py
 
 # 启动仿真 + 控制器 + MoveIt + VLM + 抓取 (无草莓/纯方块)
 ros2 launch position_topic test_no_strawberry.launch.py
+
+# 启动仿真 + 控制器 + MoveIt + VLM + 抓取 (简化版, 无阶段二/无观察位姿)
+ros2 launch position_topic test_no_strawberry_simple.launch.py
 
 # 触发阶段一 VLM 推理 (多目标识别)
 ros2 topic pub --once /task_command std_msgs/msg/String "data: '找出所有可采摘的草莓果实'"
@@ -104,7 +109,7 @@ IDLE → SETUP → MOVE_TO_OBSERVE → AWAIT_STAGE2 → PRE_GRASP
 
 - **VLM**: Qwen3-VL-Plus，bbox 使用归一化坐标 [0,1000]，非像素坐标；max_tokens=500
 - **深度**: Gemini 335 输出 32FC1 (float, m)，ee_camera 输出 16UC1 (uint16, mm)
-- **Prompts**: STAGE1 输出 `targets[]` + `obstacles[]` 数组；STAGE2 输出单目标精确定位
+- **Prompts**: STAGE1 输出 `targets[]` + `obstacles[]` 数组；STAGE2 输出单目标精确定位；GENERIC_STAGE1 支持非草莓通用场景
 - **多目标排序**: rank_targets() 按 成熟度(ripe>overripe>unripe) > 无障碍(none>leaf>stem) > 置信度 > 索引
 - **软硬分类**: VLM 标注 material ("soft"/"hard")；soft 可抓可推扫，hard 必须绕行
 - **推扫触发**: obstacle_above != "none" 且 material == "soft" → PUSH_SWEEP 状态
@@ -121,7 +126,8 @@ IDLE → SETUP → MOVE_TO_OBSERVE → AWAIT_STAGE2 → PRE_GRASP
 - **观察位姿 IK**: 部分修复 (2026-06-13)。降级观察点已移除朝向约束 (use_orientation=False) 并改为多候补参数化列表 `fallback_observation_points`。但动态观察点仍保留朝向约束，position_only_ik=True 下 KDL 无法满足，仍可能 IK 失败→触发降级链。
 - **相机位置**: X+ 和 Y/Z 轴偏移效果未全部测试完成。
 - **PRE_GRASP 朝向**: `Ry(-90°)` 使 gripper X (approach direction) 指向世界 -Z。待实测验证指尖方向是否与夹爪物理匹配。
-- **AttachLink 脱离后物体翻转**: DetachLink 后 target_box 在 Gazebo 中周期性翻转 180°。
+- **AttachLink 脱离后物体翻转**: DetachLink 后 target_box 在 Gazebo 中周期性翻转 180°。已通过 target_box.sdf 修正 (gravity=true, mass=5.0kg, size=0.05m) 缓解 (2026-06-14)，待实测确认。
+- **Cartesian 下探 wrist-flip**: ✅ 已修复 (2026-06-14)。`_plan_approach` 和 `_do_push_sweep` 之前直接使用 `/target_pose` 的水平朝向 (w=1.0)，导致 Cartesian 插值时末端翻转 90°。已改为强制 Ry(-90°) 垂直向下朝向。
 - **_consecutive_failures 计数器未消费**: grab_action 中失败计数递增但无人检查——FAILED→IDLE 立即转换，不做重试上限。vlm_bridge 侧黑名单逻辑依赖此计数但因 error 分支 bug 从未生效 (已修复 blacklist 侧，但 grab_action 侧仍无自主中断)。
 
 ## 调试常用命令

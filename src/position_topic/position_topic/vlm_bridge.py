@@ -15,7 +15,7 @@ from geometry_msgs.msg import PoseStamped, Point
 import tf2_ros
 
 from .camera_utils import (
-    get_min_depth_in_region,
+    get_median_depth_at_center,
     pixel_to_camera_3d,
     transform_point,
     compute_lookat_quaternion,
@@ -425,9 +425,10 @@ class VlmBridge(Node):
                 f"obstacle={obstacle_above} dir={direction} conf={confidence:.2f}"
             )
 
-            Z = get_min_depth_in_region(depth, x1, y1, x2, y2)
+            # 使用中心 5×5 区域中值深度, 避免 bbox 边缘(叶子/茎)的最小深度污染
+            Z = get_median_depth_at_center(depth, cx, cy, half_window=2)
             if Z is None:
-                self.get_logger().error(f"目标 {label} 深度查询失败")
+                self.get_logger().error(f"目标 {label} 中心区域深度全为 0, 跳过")
                 self._current_target_idx += 1
                 continue
 
@@ -572,9 +573,10 @@ class VlmBridge(Node):
                 f"center=[{cx},{cy}] label={label} conf={confidence:.2f}"
             )
 
-            Z = get_min_depth_in_region(depth, x1, y1, x2, y2)
+            # 使用中心 5×5 区域中值深度, 避免 bbox 边缘的最小深度污染
+            Z = get_median_depth_at_center(depth, cx, cy, half_window=2)
             if Z is None:
-                self.get_logger().error("阶段二: 深度查询失败")
+                self.get_logger().error("阶段二: 中心区域深度全为 0")
                 with self._lock:
                     if self._vlm_generation != gen:
                         return
