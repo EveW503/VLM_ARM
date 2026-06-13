@@ -1,0 +1,145 @@
+<h2>各状态的改动明细</h2>
+<p class="subtitle">grab_action_simple.py 逐状态 diff</p>
+
+<div class="section">
+<h3>状态改动一览 (砍掉的用 <span style="color:#e05555">红色</span>，新增的用 <span style="color:#55b055">绿色</span>)</h3>
+
+<table style="width:100%;font-size:0.82rem;border-collapse:collapse">
+<tr style="background:var(--box-bg)">
+  <th style="padding:0.5rem;text-align:left">状态</th>
+  <th style="padding:0.5rem;text-align:left">砍掉</th>
+  <th style="padding:0.5rem;text-align:left">新增/改变</th>
+</tr>
+<tr>
+  <td style="padding:0.5rem;font-weight:600">IDLE</td>
+  <td style="padding:0.5rem;color:#e05555">-</td>
+  <td style="padding:0.5rem;color:#55b055">+ 不用等 PlanningScene 就绪</td>
+</tr>
+<tr style="background:var(--box-bg)">
+  <td style="padding:0.5rem;font-weight:600">SETUP</td>
+  <td style="padding:0.5rem;color:#e05555">
+    - PlanningScene add_object("target")<br>
+    - target_object_dims/shape 参数<br>
+    - _target_object_registered 标志
+  </td>
+  <td style="padding:0.5rem;color:#55b055">
+    + 只做: 重置 _consecutive_failures<br>
+    + 直接 → PRE_GRASP
+  </td>
+</tr>
+<tr>
+  <td style="padding:0.5rem;font-weight:600">PRE_GRASP</td>
+  <td style="padding:0.5rem;color:#e05555">
+    - _psm remove_object (不再存在)<br>
+    - _send_move_request → MoveGroup<br>
+    - _build_request (PositionConstraint 等)<br>
+    - MotionPlanRequest 全部
+  </td>
+  <td style="padding:0.5rem;color:#55b055">
+    + IK(target_pose, seed=current_joints)<br>
+    + joint_interpolate(current, ik_result)<br>
+    + execute_trajectory(joint_traj)<br>
+    + Z 钳制 safe_z_min=0.20 保留<br>
+    + TF 查询姿态 保留
+  </td>
+</tr>
+<tr style="background:var(--box-bg)">
+  <td style="padding:0.5rem;font-weight:600">PUSH_SWEEP</td>
+  <td style="padding:0.5rem;color:#e05555">
+    - compute_cartesian_path 服务调用<br>
+    - 同步等待 future (while spin_once)
+  </td>
+  <td style="padding:0.5rem;color:#55b055">
+    + cartesian_interpolate(3 waypoints)<br>
+    + execute_trajectory<br>
+    + 降级逻辑保留 (失败→APPROACH)
+  </td>
+</tr>
+<tr>
+  <td style="padding:0.5rem;font-weight:600">APPROACH</td>
+  <td style="padding:0.5rem;color:#e05555">
+    - _psm remove_object<br>
+    - compute_cartesian_path 服务调用<br>
+    - fraction<0.9 降级逻辑
+  </td>
+  <td style="padding:0.5rem;color:#55b055">
+    + cartesian_interpolate(1 waypoint)<br>
+    + P_rough→物体中心 Z 修正保留<br>
+    + 沿用 _pre_grasp_orientation
+  </td>
+</tr>
+<tr style="background:var(--box-bg)">
+  <td style="padding:0.5rem;font-weight:600">GRASP</td>
+  <td style="padding:0.5rem;color:#e05555">
+    - _psm.attach_object("target","gripper")
+  </td>
+  <td style="padding:0.5rem;color:#55b055">
+    + 仅保留 Gazebo AttachLink (不变)
+  </td>
+</tr>
+<tr>
+  <td style="padding:0.5rem;font-weight:600">LIFT_PLAN</td>
+  <td style="padding:0.5rem;color:#e05555">
+    - _send_move_request → MoveGroup
+  </td>
+  <td style="padding:0.5rem;color:#55b055">
+    + IK + joint_interpolate<br>
+    + 物体已附着, 直接抬升
+  </td>
+</tr>
+<tr style="background:var(--box-bg)">
+  <td style="padding:0.5rem;font-weight:600">TRANSPORT</td>
+  <td style="padding:0.5rem;color:#e05555">
+    - _send_move_request → MoveGroup
+  </td>
+  <td style="padding:0.5rem;color:#55b055">
+    + IK + joint_interpolate<br>
+    + 物体已附着, 直接搬运
+  </td>
+</tr>
+<tr>
+  <td style="padding:0.5rem;font-weight:600">PLACE</td>
+  <td style="padding:0.5rem;color:#e05555">
+    - _psm.detach_object<br>
+    - _psm.forbid_collision<br>
+    - _psm.remove_object
+  </td>
+  <td style="padding:0.5rem;color:#55b055">
+    + 仅 Gazebo DetachLink + 张爪 (不变)
+  </td>
+</tr>
+<tr style="background:var(--box-bg)">
+  <td style="padding:0.5rem;font-weight:600">FAILED</td>
+  <td style="padding:0.5rem;color:#e05555">
+    - _psm.remove_object("target")
+  </td>
+  <td style="padding:0.5rem;color:#55b055">
+    + 只需清状态, 直接回 IDLE
+  </td>
+</tr>
+</table>
+</div>
+
+<div class="section" style="margin-top:1.5rem">
+<h3>关键简化</h3>
+<div class="pros-cons">
+  <div class="pros"><h4>完全删除</h4><ul>
+    <li>PlanningSceneManager 整个类</li>
+    <li>moveit_msgs 全部导入</li>
+    <li>/move_action action client</li>
+    <li>/compute_cartesian_path service client</li>
+    <li>/collision_object topic pub</li>
+    <li>/attached_collision_object topic pub</li>
+    <li>_build_request / _send_move_request / _move_*_cb (共 ~80 行)</li>
+  </ul></div>
+  <div class="cons"><h4>保留不变</h4><ul>
+    <li>/arm_controller action client</li>
+    <li>/gripper_controller action client</li>
+    <li>/ATTACHLINK / /DETACHLINK service</li>
+    <li>/target_pre_grasp / /target_metadata 订阅</li>
+    <li>/grab_status 发布</li>
+    <li>push_sweep 模块 (只改生成方式)</li>
+  </ul></div>
+</div>
+</div>
+</div>

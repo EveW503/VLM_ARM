@@ -1,0 +1,56 @@
+<h2>当前架构: MoveIt 在抓取流程中的角色</h2>
+<p class="subtitle">SO101 5-DOF 臂，KDL kinematics_solver，position_only_ik=True</p>
+
+<div class="section">
+<h3>MoveIt 现在做了什么</h3>
+<div class="pros-cons">
+  <div class="pros">
+    <h4>实际用到的功能</h4>
+    <ul>
+      <li>IK 求解 (KDL plugin, 5-DOF 只解位置)</li>
+      <li>运动规划 (OMPL → 碰撞避让)</li>
+      <li>Cartesian path (compute_cartesian_path)</li>
+      <li>Planning Scene (碰撞物体注册/附着)</li>
+      <li>轨迹执行编排</li>
+    </ul>
+  </div>
+  <div class="cons">
+    <h4>痛点</h4>
+    <ul>
+      <li>ACM bug: ApplyPlanningScene 覆盖 SRDF，gripper↔jaw 误报</li>
+      <li>position_only_ik=True 下 KDL 解不了姿态 → 建大量 workaround</li>
+      <li>5s planning_time 太慢</li>
+      <li>配置复杂，调试困难</li>
+      <li>MoveIt 本身约 100MB+ 依赖</li>
+    </ul>
+  </div>
+</div>
+</div>
+
+<div class="section">
+<h3>当前抓取流程中的 MoveIt 调用点</h3>
+
+<pre style="background:var(--box-bg);padding:1rem;border-radius:0.5rem;font-size:0.85rem;line-height:1.6;overflow-x:auto">
+  IDLE → SETUP        ← PlanningScene: add collision object
+       → PRE_GRASP    ← <b>MoveGroup action</b> (/move_action): IK + 规划 + 执行
+       → [PUSH_SWEEP] ← <b>compute_cartesian_path</b>: 3 航点
+       → APPROACH     ← <b>compute_cartesian_path</b>: 1 航点 (直线下探)
+       → GRASP        ← AttachLink + PlanningScene attach
+       → LIFT_PLAN    ← <b>MoveGroup action</b>
+       → TRANSPORT    ← <b>MoveGroup action</b>
+       → PLACE        ← DetachLink + PlanningScene detach
+       → IDLE</pre>
+<p style="margin-top:0.5rem;color:var(--muted);font-size:0.85rem">
+  共 <b>3 个 MoveGroup 规划</b> + <b>2 个 Cartesian path</b> (推扫 + 下探)
+</p>
+</div>
+
+<div class="section">
+<h3>核心矛盾</h3>
+<p>这是一个 <b>5-DOF 臂</b>，工作空间几乎无障碍物，任务是最简单的 pick-and-place。</p>
+<p>MoveIt 设计目标是一般性操作场景（多障碍物、多自由度、复杂约束），用在这里是牛刀杀鸡。</p>
+<p style="color:var(--accent)">你的直觉是对的 —— 移掉 MoveIt 值得认真评估。</p>
+</div>
+</pre>
+</div>
+</div>

@@ -1,0 +1,48 @@
+<h2>IK 求解器设计</h2>
+<p class="subtitle">ik_manager.py — IKManager + 两种插值器</p>
+
+<div class="section">
+<h3>1. KDL Chain 构建</h3>
+<pre style="background:var(--box-bg);padding:1rem;border-radius:0.5rem;font-size:0.82rem;line-height:1.5">
+<b>输入:</b> /robot_description (URDF XML 字符串, 已在 ROS param server)
+<b>输出:</b> KDL Chain (base_link → gripper)
+
+<b>构建步骤:</b>
+1. xml.etree / urdf_parser_py 解析 URDF
+2. 遍历 &lt;joint&gt; 元素, 提取: name, type, parent, child, origin(xyz, rpy), axis
+3. 从 base_link 出发, BFS/DFS 沿树走到 gripper
+4. 为每个 joint 创建 KDL.Segment (KDL.Joint + KDL.RigidBodyInertia)
+5. chain.addSegment(segment)
+6. 创建 KDL.ChainFkSolverPos_recursive + KDL.ChainIkSolverVel_pinv → KDL.ChainIkSolverPos_NR_JL
+
+<b>简单情况:</b> SO101 只有 arm 的 5 个 revolute joint (joint1~5)
+            → 直接按 joint index 顺序构建, 不需要做路径搜索
+</pre>
+</div>
+
+<div class="section">
+<h3>2. IK 求解</h3>
+<pre style="background:var(--box-bg);padding:1rem;border-radius:0.5rem;font-size:0.82rem;line-height:1.5">
+<b>solve_ik(target_pose: Pose, seed: list[float]) → list[float] | None</b>
+
+target_pose: geometry_msgs/Pose (base 系下的 gripper 目标位姿)
+seed: 当前 5 个关节角 (从 /joint_states 获取)
+
+1. KDL.JntArray 初始化 seed (5 DOF)
+2. KDL.Frame 构建目标: pos → KDL.Vector, ori → 四元数归一化 → KDL.Rotation
+3. solver.CartToJnt(seed, target_frame, result)
+4. 返回 result (5 floats) 或 None (求解失败)
+
+<b>参数复用:</b>
+- search_resolution: 0.005 (与当前 kinematics.yaml 一致)
+- timeout: 0.1s → 约 500 次迭代 (NR_JL 每次迭代 O(n))
+
+<b>position_only 行为:</b>
+KDL 默认解 6-DOF 全姿态。对于 5-DOF 臂, 需要在创建 ChainIkSolverVel_pinv
+时设权重矩阵, 或者接受 "找到一个近似解" 的结果然后检查位置误差。
+
+简化做法: 不给权重, 直接用 NR_JL 求解; 求解后计算 FK, 验证位置误差 &lt; 1mm。
+NR_JL 对冗余问题会自动找最小二乘解。
+</pre>
+</div>
+</div>

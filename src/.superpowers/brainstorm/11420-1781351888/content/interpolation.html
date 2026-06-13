@@ -1,0 +1,57 @@
+<h2>插值策略 & 轨迹生成</h2>
+<p class="subtitle">IK 求解 → JointTrajectory 的点数、步长、时间控制</p>
+
+<div class="section">
+<h3>关节空间插值 (PRE_GRASP, LIFT, TRANSPORT)</h3>
+<pre style="background:var(--box-bg);padding:1rem;border-radius:0.5rem;font-size:0.82rem;line-height:1.5">
+<b>joint_interpolate(start_joints, target_joints, max_step=0.05)</b>
+
+1. start_joints: 当前关节角 (从 /joint_states)
+2. 对目标 IK 求解 → target_joints
+3. 计算 max(|Δjoint|) → 决定步数 N = max(2, ceil(max_delta / max_step))
+4. 线性插值: for i in 1..N: joints[i] = start + (target-start) * i/N
+5. 封装为 JointTrajectoryPoint (positions + time_from_start)
+
+<b>时间策略:</b>
+- max_step=0.05 rad → 每步约 0.05/velocity_scaling ≈ 0.17s @ velocity=0.3
+- 步数通常 5~15 (取决于关节角跨度)
+- 不做梯形速度规划, 等间距时间 (依赖底层 arm_controller 做平滑)
+
+<b>为什么够用:</b>
+- PRE_GRASP: 已经在上方, 关节角变化小
+- LIFT: 直上, 关节变化更小
+- TRANSPORT: 最远的一段, 但无障碍 → 直线关节插值即可
+</pre>
+</div>
+
+<div class="section">
+<h3>笛卡尔插值 (APPROACH, PUSH_SWEEP)</h3>
+<pre style="background:var(--box-bg);padding:1rem;border-radius:0.5rem;font-size:0.82rem;line-height:1.5">
+<b>cartesian_interpolate(start_pose, target_pose, start_joints, max_step=0.01)</b>
+
+1. 计算笛卡尔距离 d = |target - start|
+2. 步数 N = max(2, ceil(d / max_step))
+3. 线性插值位姿 (pos=lerp, ori=slerp/恒等)
+4. 对每个 waypoint 逐点 IK: seed = 上一个 waypoint 的解
+5. 返回 JointTrajectory (每点用同一时间步长)
+
+<b>关键:</b>
+- max_step=0.01m ← 与当前 compute_cartesian_path 一致
+- 姿态沿用 PRE_GRASP 后的 TF 查询结果 (纯平移, ori 不变)
+- 推扫 3 个 waypoint 也用同一套逻辑 → 统一代码路径
+
+<b>为什么不需要 MoveIt 的 Cartesian service:</b>
+- 没有障碍物 → 不需要沿路径做碰撞检测
+- 纯平移 + IK 即等于 "沿直线移动末端"
+- 如果某 waypoint IK 失败 → 中止, 走 FAILED (当前也是)
+</pre>
+</div>
+
+<div class="section">
+<h3>轨迹执行 — 不变</h3>
+<pre style="background:var(--box-bg);padding:1rem;border-radius:0.5rem;font-size:0.82rem;line-height:1.5">
+生成的 JointTrajectory 直接通过 /arm_controller/follow_joint_trajectory action 执行。
+这部分 <b>完全不改</b> — 现有 _arm_traj_action + _execute_cartesian_trajectory 回调链条保留。
+</pre>
+</div>
+</div>

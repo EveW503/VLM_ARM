@@ -43,6 +43,8 @@ setup(
             'position_subscriber = position_topic.position_subscriber:main',
             'vlm_bridge = position_topic.vlm_bridge:main',
             'grab_action = position_topic.grab_action:main',
+            'vlm_bridge_simple = position_topic.vlm_bridge_simple:main',
+            'grab_action_simple = position_topic.grab_action_simple:main',
             'camera_axis_calibrator = position_topic.camera_axis_calibrator:main',
         ],
     },

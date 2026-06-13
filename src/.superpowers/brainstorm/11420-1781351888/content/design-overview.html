@@ -1,0 +1,83 @@
+<h2>设计概览：PyKDL 替代 MoveIt</h2>
+<p class="subtitle">仅改造 grab_action_simple.py，vlm_bridge/camera_utils/prompts 不受影响</p>
+
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-header">Before (MoveIt)</div>
+    <div class="mockup-body">
+      <pre style="font-size:0.75rem;line-height:1.5">
+<b>依赖:</b>
+├── moveit_msgs (MoveGroup, PlanningScene,
+│               CartesianPath, Constraints...)
+├── PlanningSceneManager
+│   └── /collision_object (topic)
+│   └── /attached_collision_object (topic)
+├── /move_action (MoveGroup action)
+├── /compute_cartesian_path (service)
+└── /arm_controller (trajectory exec)
+
+<b>流程:</b>
+PRE_GRASP → MoveGroup(IK+plan)→执行
+APPROACH  → GetCartesianPath→执行
+LIFT      → MoveGroup(IK+plan)→执行
+TRANSPORT → MoveGroup(IK+plan)→执行
+      </pre>
+    </div>
+  </div>
+  <div class="mockup">
+    <div class="mockup-header">After (PyKDL)</div>
+    <div class="mockup-body">
+      <pre style="font-size:0.75rem;line-height:1.5">
+<b>依赖:</b>
+├── PyKDL (Python KDL bindings)
+├── urdf_parser_py (parse URDF → KDL chain)
+├── sensor_msgs/JointState (IK seed)
+├── tf2_ros (orientation query)
+└── /arm_controller (trajectory exec)
+
+<b>流程:</b>
+PRE_GRASP → IK(joint_interp)→执行
+APPROACH  → IK(cart_interp)→执行
+LIFT      → IK(joint_interp)→执行
+TRANSPORT → IK(joint_interp)→执行
+      </pre>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:1.5rem">
+<h3>模块拆分</h3>
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
+  <div>
+    <h4>🆕 ik_manager.py (新文件)</h4>
+    <ul style="font-size:0.85rem">
+      <li><b>IKManager.__init__</b>: 从 /robot_description 加载 URDF → KDL Chain → KDL Solver</li>
+      <li><b>solve_ik(pose, seed)</b>: 单次 IK 求解，返回关节角或 None</li>
+      <li><b>joint_interpolate(start, target, max_step)</b>: 关节空间线性插值 → JointTrajectory</li>
+      <li><b>cartesian_interpolate(start_pose, target_pose, current_joints, max_step)</b>: 笛卡尔插值 → 逐点 IK → JointTrajectory</li>
+    </ul>
+  </div>
+  <div>
+    <h4>✏️ grab_action_simple.py (改造)</h4>
+    <ul style="font-size:0.85rem">
+      <li><b>砍掉</b>: MoveGroup action, CartesianPath service, PlanningSceneManager, moveit_msgs 全部</li>
+      <li><b>砍掉</b>: _build_request, _send_move_request, _move_*_cb</li>
+      <li><b>新增</b>: IKManager 实例, /joint_states 订阅 (IK seed)</li>
+      <li><b>改造</b>: PRE_GRASP/LIFT/TRANSPORT → IK + joint_interp + execute</li>
+      <li><b>改造</b>: APPROACH/PUSH_SWEEP → cartesian_interp + execute</li>
+      <li><b>砍掉</b>: 所有 _psm.xxx 调用, _target_object_registered</li>
+    </ul>
+  </div>
+</div>
+</div>
+
+<div class="section">
+<h3>状态流保持不变</h3>
+<pre style="background:var(--box-bg);padding:0.75rem;border-radius:0.5rem;font-size:0.8rem">
+IDLE → SETUP → PRE_GRASP → [PUSH_SWEEP] → APPROACH → GRASP
+  → LIFT_PLAN → TRANSPORT_PLAN → PLACE → IDLE
+</pre>
+<p style="font-size:0.85rem;color:var(--muted)">状态机逻辑不变，只换底层运动执行方式。</p>
+</div>
+</div>

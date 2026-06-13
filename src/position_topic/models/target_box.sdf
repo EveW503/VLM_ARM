@@ -4,13 +4,13 @@
     <static>false</static>
 
     <link name="box_link">
-      <gravity>false</gravity>
+      <gravity>true</gravity>
       <inertial>
-        <mass>0.05</mass>
+        <mass>5.0</mass>
         <inertia>
-          <ixx>0.00001</ixx>
-          <iyy>0.00001</iyy>
-          <izz>0.00001</izz>
+          <ixx>0.0021</ixx>
+          <iyy>0.0021</iyy>
+          <izz>0.0021</izz>
           <ixy>0.0</ixy>
           <ixz>0.0</ixz>
           <iyz>0.0</iyz>
@@ -20,7 +20,7 @@
       <collision name="box_collision">
         <geometry>
           <box>
-            <size>0.03 0.03 0.03</size>
+            <size>0.05 0.05 0.05</size>
           </box>
         </geometry>
       </collision>
@@ -28,7 +28,7 @@
       <visual name="box_visual">
         <geometry>
           <box>
-            <size>0.03 0.03 0.03</size>
+            <size>0.05 0.05 0.05</size>
           </box>
         </geometry>
         

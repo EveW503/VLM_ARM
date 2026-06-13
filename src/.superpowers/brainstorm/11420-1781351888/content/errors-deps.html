@@ -1,0 +1,79 @@
+<h2>错误处理 & 依赖变更 & 测试</h2>
+
+<div class="section">
+<h3>错误处理策略</h3>
+<table style="width:100%;font-size:0.82rem;border-collapse:collapse">
+<tr style="background:var(--box-bg)">
+  <th style="padding:0.5rem;text-align:left">失败场景</th>
+  <th style="padding:0.5rem;text-align:left">处理方式</th>
+</tr>
+<tr>
+  <td style="padding:0.5rem">IK 求解失败 (NR_JL 不收敛)</td>
+  <td style="padding:0.5rem">→ FAILED (与当前 MoveGroup 失败行为一致)</td>
+</tr>
+<tr style="background:var(--box-bg)">
+  <td style="padding:0.5rem">笛卡尔路径中某 waypoint IK 失败</td>
+  <td style="padding:0.5rem">→ APPROACH: 直接 FAILED<br>→ PUSH_SWEEP: 降级为 APPROACH (保持现有降级逻辑)</td>
+</tr>
+<tr>
+  <td style="padding:0.5rem">/joint_states 不可用 (无 IK seed)</td>
+  <td style="padding:0.5rem">→ 启动时等待, 超时 5s → 报错退出 (必须依赖)</td>
+</tr>
+<tr style="background:var(--box-bg)">
+  <td style="padding:0.5rem">/robot_description 参数不存在</td>
+  <td style="padding:0.5rem">→ 启动时检查, 缺失 → 报错退出</td>
+</tr>
+<tr>
+  <td style="padding:0.5rem">arm_controller 拒绝轨迹</td>
+  <td style="padding:0.5rem">→ FAILED (与当前行为一致)</td>
+</tr>
+<tr style="background:var(--box-bg)">
+  <td style="padding:0.5rem">IK 后位置误差 &gt; 1mm (FK 验证)</td>
+  <td style="padding:0.5rem">→ WARN 日志 + 继续执行 (NR_JL 最小二乘解可接受)</td>
+</tr>
+</table>
+</div>
+
+<div class="section">
+<h3>package.xml 依赖变更</h3>
+<pre style="background:var(--box-bg);padding:1rem;border-radius:0.5rem;font-size:0.82rem;line-height:1.5">
+<b>移除:</b>
+- moveit_msgs        ← 不再使用 MoveGroup/PlanningScene/CartesianPath 消息
+- shape_msgs         ← 不再构建 SolidPrimitive (碰撞物体)
+
+<b>新增:</b>
+- sensor_msgs        ← 订阅 /joint_states 获取 IK seed (可能已有)
+
+<b>保留:</b>
+- rclpy, geometry_msgs, action_msgs, control_msgs, trajectory_msgs,
+  tf2_ros, linkattacher_msgs, gazebo_msgs, std_msgs
+</pre>
+</div>
+
+<div class="section">
+<h3>测试验证方案</h3>
+<pre style="background:var(--box-bg);padding:1rem;border-radius:0.5rem;font-size:0.82rem;line-height:1.5">
+<b>1. IK 单元测试 (不启仿真):</b>
+   - 加载 URDF → 构建 Chain
+   - 取几个已知关节角 → FK → 能正确返回末端位姿
+   - 用 FK 结果反解 IK → 能回到原关节角 (或等价解)
+   - 测试 position_only 行为: 不同姿态但同位置 → IK 收敛
+
+<b>2. 插值测试:</b>
+   - joint_interpolate: 验证步数、关节限位
+   - cartesian_interpolate: 验证 waypoint 数、每步位置误差
+
+<b>3. 仿真集成测试:</b>
+   - 启动 test_no_strawberry_simple.launch.py
+   - 发布 /target_pre_grasp → 触发全流程
+   - 验证状态流完整: IDLE → ... → PLACE → IDLE
+   - 抓取成功率
+
+<b>4. 回归检查:</b>
+   - PUSH_SWEEP 降级链
+   - Z 钳制 safe_z_min
+   - APPROACH Z 修正 (P_rough → 物体中心)
+   - TF 查询姿态
+</pre>
+</div>
+</div>
